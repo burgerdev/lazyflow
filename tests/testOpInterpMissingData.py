@@ -60,7 +60,14 @@ class TestInterpMissingData(object):
         d8=np.ones((10,10,100))
         for i in range(100): d8[:,:,i]*=(i+1)
         d8[:,:,98]=0
-
+        
+        
+        
+        #empty with noise
+        d9=np.ones((10,10,100))
+        for i in range(100): d9[:,:,i]*=(i+1)
+        d9[:,:,90]= np.random.rand(10,10)*5
+        
         self.d1 = d1
         self.d2 = d2
         self.d21 = d21
@@ -72,6 +79,16 @@ class TestInterpMissingData(object):
         self.d6 = d6
         self.d7 = d7
         self.d8 = d8
+        self.d9 = d9
+        
+    def testRandom(self):
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        op.InputVolume.setValue( self.d8 )
+        op.InputSearchDepth.setValue(0)
+
+
+        assert np.all(op.Output[:].wait()[:,:,90]>=np.ones((10,10))*80)
 
     def testBasic(self):
         d1 = self.d1
