@@ -3,12 +3,18 @@ from lazyflow.graph import Operator, InputSlot, OutputSlot
 import numpy as np
 import vigra
 
+
+
 class OpInterpMissingData(Operator):
     name = "OpInterpMissingData"
 
     InputVolume = InputSlot()
     InputSearchDepth = InputSlot()
     Output = OutputSlot()
+    
+    interpolationMethod = 'cubic'
+    _requiredMargin = {'cubic': 2, 'linear': 1}
+    _fallbacks = {'cubic': 'linear', 'linear': None}
 
     def setupOutputs(self):
         # Output has the same shape/axes/dtype/drange as input
@@ -23,14 +29,37 @@ class OpInterpMissingData(Operator):
             assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
 
     def execute(self, slot, subindex, roi, result):
-        warnings.warn("FIXME: This operator should be memory-optimized using request.writeInto()")
+        
+        # we want to interpolate in two steps
+        #   1. Detection of missing regions
+        #   2. Interpolation of each missing region
+        
+        #OLD WARNING warnings.warn("FIXME: This operator should be memory-optimized using request.writeInto()")
 
+        # acquire data
         data = self.InputVolume.get(roi).wait()
         depth= self.InputSearchDepth.value
 
         data = data.view( vigra.VigraArray )
         data.axistags = self.InputVolume.meta.axistags
         
+        
+        #TODO if slot == interpolated data
+        #TODO if subindex is adequate
+        
+        missing = self._detectMissing(data)
+        
+        #TODO sanity checks
+        #TODO partitioning
+        
+        #for 'missing rectangles' in missing
+        self._interpolate(data,missing)
+        
+        
+        result[:] = data
+        return result
+    
+        '''
         self._interpMissingLayer(data.withAxes(*'xyz'))
 
         z_index = self.InputVolume.meta.axistags.index('z')
@@ -43,7 +72,7 @@ class OpInterpMissingData(Operator):
         #   while roi top layer is empty, 
         #   push layer from data to top of roi
         offset0=0
-        while(np.sum(data[:,:,0])==0):
+        while(self.isMissing(data[:,:,0])):
 
             #searched depth reached
             if offset0==depth:
@@ -63,7 +92,7 @@ class OpInterpMissingData(Operator):
         #   while roi bottom layer is empty, 
         #   push layer from data to bottom of roi 
         offset1=0
-        while(np.sum(data[:,:,-1])==0):
+        while(self.isMissing(data[:,:,-1])):
             #searched depth reached
             if offset1==depth:
                 break
@@ -92,18 +121,86 @@ class OpInterpMissingData(Operator):
 
         result[:] = data
         return result
+        
+        '''
 
     def propagateDirty(self, slot, subindex, roi):
         # TODO: This implementation of propagateDirty() isn't correct.
         #       That's okay for now, since this operator will never be used with input data that becomes dirty.
+        #TODO if the input changes we're doing nothing?
+        warnings.warn("FIXME: propagateDirty not implemented!")
         self.Output.setDirty(roi)
+        
+    def _interpolate(self,data,missing):
+        '''
+        interpolates in z direction
+        volume: 5d block with axistags 'tzyxc' and singleton 'c' and 't'
+        missing: rectangular block of missing values (NO multiple blocks)
+        method: 'cubic' or 'linear'
+        '''
+        
+        method = self.interpolationMethod
+        # sanity checks
+        assert method in self._requiredMargin.keys(), "Unknown method '{}'".format(method)
+        
+        # number and z-location of missing slices (z-axis is at zero)
+        black_z_ind = np.where(missing>0)[0]
+        
+        if len(black_z_ind) == 0: # no need for interpolation
+            return 
+        
+        # indices with respect to the required margin around the missing values
+        minind = black_z_ind.min() - self._requiredMargin[method]
+        maxind = black_z_ind.max() + self._requiredMargin[method]
+        
+        n = maxind-minind-2*self._requiredMargin[method]+1
 
+        if not (minind>-1 and maxind < volume.size):
+            # this method is not applicable, try another one
+            warnings.warn("Margin not big enough for interpolation (need at least {} pixels for '{}')".format(self._requiredMargin[method], method))
+            if self._fallbacks[method] is not None:
+                warnings.warn("Falling back to method '{}'".format(self._fallbacks[method]))
+                interp1d(volume, missing, fallbacks[method])
+                return
+            else:
+                assert False, "Margin not big enough for interpolation (need at least {} pixels for '{}') and no fallback available".format(self._requiredMargin[method], method)
+        
+        if method == 'linear':
+            xs = np.linspace(0,1,n+2)
+            for i in range(n):
+                # interpolate every slice
+                left = volume[minind,...]
+                right = volume[maxind,...]
+                volume[black_z_ind[i],...] = xs[i+1]*left + (1-xs[i+1])*right
+                
+        else: #cubic
+            vec = np.matrix("0;0;0;0")
+            
+            # interpolation coefficients
+            a = CubicInterpolationMatrix * vec
+            
+            F0 = volume[minind,...]
+            F1 = volume[minind+1,...]
+            F2 = volume[maxind-1,...]
+            F3 = volume[maxind,...]
+            
+            (A0,A1,A2,A3) = _cubic_coeffs_mat(F0,F1,F2,F3)
+            
+            xs = np.linspace(0,1,n+2)
+            for i in range(n):
+                # interpolate every slice
+                x = xs[i+1]
+                volume[black_z_ind[i],...] = _spline_mat(A0, A1, A2, A3, x, x**2, x**3)
+
+    '''
     def _interpMissingLayer(self, data):
         """
         Description: Interpolates empty layers and stacks of layers in which all values are zero.
 
         :param data: Must be 3d, in xyz order.
         """
+        #TODO determine empty layer by NaNs
+        #TODO 
         assert len(data.shape)==3
         
         fl=data.sum(0).sum(0)==0 #False Layer Array
@@ -182,3 +279,49 @@ class OpInterpMissingData(Operator):
         for i in range(data.shape[2]):
             data[:,:,i]=data[:,:,0]
         return data
+        
+    '''
+
+    def _detectMissing(self, data):
+        return np.zeros(data.shape, dtype=np.uint8)
+    
+    def isMissing(self,data):
+        """
+        determines if data is missing values or not
+        
+        :param data: a 2-D slice
+        :type data: array-like
+        :returns: bool - -True, if data seems to be missing
+        """
+        #TODO this could be done much better
+        return np.sum(data)==0
+    
+    
+    
+
+
+
+
+def _spline(a0, a1, a2, a3, x, x2, x3):
+    return a0+a1*x+a2*x2+a3*x3
+
+def _cubic_coeffs(f,g,h,i):
+    '''
+    cubic interpolation coefficients of vector (x is missing, o is arbitrary)
+    oooooofgxxxhioooo
+    '''
+    # CubicInterpolationMatrix = np.matrix("0, 1, 0, 0;-1, 1, 0, 0; 2, -5, 4, -1;-1, 3, -3, 1")
+    #a = g
+    #b = -f+g
+    #c = 2*f-5*g+4*h-i
+    #d = -f+3*g-3*h+i
+    
+    return (g,g-f,2*f-5*g+4*h-i,-f+3*g-3*h+i)
+    
+_spline_mat = np.vectorize(_spline, otypes=[np.float])
+_cubic_coeffs_mat = np.vectorize(_cubic_coeffs, otypes=[np.float,np.float,np.float,np.float])
+
+
+
+if __name__ == "__main__":
+    pass
