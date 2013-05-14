@@ -13,8 +13,8 @@ class OpInterpMissingData(Operator):
     Output = OutputSlot()
     
     interpolationMethod = 'cubic'
-    _requiredMargin = {'cubic': 2, 'linear': 1}
-    _fallbacks = {'cubic': 'linear', 'linear': None}
+    _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
+    _fallbacks = {'cubic': 'linear', 'linear': 'constant', 'constant': None}
 
     def setupOutputs(self):
         # Output has the same shape/axes/dtype/drange as input
@@ -47,14 +47,13 @@ class OpInterpMissingData(Operator):
         #TODO if slot == interpolated data
         #TODO if subindex is adequate
         
-        missing = self._detectMissing(data)
+        missing = self._detectMissing(data.withAxes(*'xyz').transposeToNumpyOrder())
         
         #TODO sanity checks
         #TODO partitioning
         
         #for 'missing rectangles' in missing
-        self._interpolate(data,missing)
-        
+        self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),missing)
         
         result[:] = data
         return result
@@ -131,15 +130,18 @@ class OpInterpMissingData(Operator):
         warnings.warn("FIXME: propagateDirty not implemented!")
         self.Output.setDirty(roi)
         
-    def _interpolate(self,data,missing):
+    def _interpolate(self,volume,missing, method = None):
         '''
         interpolates in z direction
-        volume: 5d block with axistags 'tzyxc' and singleton 'c' and 't'
-        missing: rectangular block of missing values (NO multiple blocks)
-        method: 'cubic' or 'linear'
+        :param volume: 3d block with axistags 'zyx'
+        :type volume: array-like
+        :param missing: integers greater zero where data is missing
+        :type missing: uint8, 3d block with axistags 'zyx'
+        :param method: 'cubic' or 'linear'
+        :type method: str
         '''
         
-        method = self.interpolationMethod
+        method = self.interpolationMethod if method is None else method
         # sanity checks
         assert method in self._requiredMargin.keys(), "Unknown method '{}'".format(method)
         
@@ -154,43 +156,55 @@ class OpInterpMissingData(Operator):
         maxind = black_z_ind.max() + self._requiredMargin[method]
         
         n = maxind-minind-2*self._requiredMargin[method]+1
-
-        if not (minind>-1 and maxind < volume.size):
+        
+        if not (minind>-1 and maxind < volume.shape[0]):
             # this method is not applicable, try another one
             warnings.warn("Margin not big enough for interpolation (need at least {} pixels for '{}')".format(self._requiredMargin[method], method))
             if self._fallbacks[method] is not None:
                 warnings.warn("Falling back to method '{}'".format(self._fallbacks[method]))
-                interp1d(volume, missing, fallbacks[method])
+                self._interpolate(volume, missing, self._fallbacks[method])
                 return
             else:
                 assert False, "Margin not big enough for interpolation (need at least {} pixels for '{}') and no fallback available".format(self._requiredMargin[method], method)
         
         if method == 'linear':
             xs = np.linspace(0,1,n+2)
+            left = volume[minind,...]
+            right = volume[maxind,...]
+           
             for i in range(n):
                 # interpolate every slice
-                left = volume[minind,...]
-                right = volume[maxind,...]
-                volume[black_z_ind[i],...] = xs[i+1]*left + (1-xs[i+1])*right
+                volume[minind+i+1,...] = xs[i+1]*right + (1-xs[i+1])*left
                 
-        else: #cubic
-            vec = np.matrix("0;0;0;0")
-            
+        elif method == 'cubic': 
             # interpolation coefficients
-            a = CubicInterpolationMatrix * vec
-            
             F0 = volume[minind,...]
             F1 = volume[minind+1,...]
             F2 = volume[maxind-1,...]
             F3 = volume[maxind,...]
-            
             (A0,A1,A2,A3) = _cubic_coeffs_mat(F0,F1,F2,F3)
             
             xs = np.linspace(0,1,n+2)
             for i in range(n):
                 # interpolate every slice
                 x = xs[i+1]
-                volume[black_z_ind[i],...] = _spline_mat(A0, A1, A2, A3, x, x**2, x**3)
+                volume[minind+i+2,...] = _spline_mat(A0, A1, A2, A3, x, x**2, x**3)
+        else: #constant
+            print(minind,maxind)
+            if minind > 0:
+                # fill right hand side with last good slice
+                for i in range(maxind-minind+1):
+                    #TODO what about non-missing values???
+                    volume[minind+i,...] = volume[minind-1,...]
+            elif maxind < volume.shape[0]-1:
+                # fill left hand side with last good slice
+                for i in range(maxind-minind+1):
+                    #TODO what about non-missing values???
+                    volume[minind+i,...] = volume[maxind+1,...]
+            else:
+                # nothing to do for empty block
+                pass
+                
 
     '''
     def _interpMissingLayer(self, data):
@@ -283,7 +297,12 @@ class OpInterpMissingData(Operator):
     '''
 
     def _detectMissing(self, data):
-        return np.zeros(data.shape, dtype=np.uint8)
+        missing = np.zeros(data.shape, dtype=np.uint8)
+        
+        for i in range(data.shape[0]):
+            missing[i,...] = 1 if self.isMissing(data[i,...]) else 0
+        
+        return missing
     
     def isMissing(self,data):
         """

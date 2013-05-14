@@ -4,7 +4,18 @@ import numpy as np
 import vigra
 from lazyflow.operators.opInterpMissingData import OpInterpMissingData
 
-class TestInterpMissingData(object):
+import unittest
+
+class TestInterpMissingData(unittest.TestCase):
+    
+    def assertArraysAlmostEqual(self,a,b):
+        if not np.mean((a-b)**2)<1e-7:
+            self.fail("\n" + str(a) + "\n\n != \n\n" + str(b) + "\n")
+            
+    def assertAll(self,b):
+        if not np.all(b):
+            self.fail("\n" + str(b) + "\n")
+            
     def setUp(self):
 
         #Large block and one single Layer is empty
@@ -73,49 +84,56 @@ class TestInterpMissingData(object):
         self.d7 = d7
         self.d8 = d8
 
-    def testBasic(self):
-        d1 = self.d1
-        d2 = self.d2
-        d3 = self.d3
-        d4 = self.d4
-        d5 = self.d5
-        d6 = self.d6
-        d7 = self.d7
-        d8 = self.d8
+    def testBasicLinear(self):
 
         Ones=np.ones((10,10))
         g=Graph()
         op = OpInterpMissingData(graph = g)
-        op.InputVolume.setValue( d1 )
+        op.InputVolume.setValue( self.d1 )
         op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = 'linear'
+
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,40],Ones*41)
+        
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,70],Ones*71)
+        
+        op.InputVolume.setValue( self.d2 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,4],Ones*11)
+        
+        op.InputVolume.setValue( self.d3 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,99],Ones*99)
+        
+        op.InputVolume.setValue( self.d4 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,1],Ones*2)
+        
+        op.InputVolume.setValue( self.d5 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,0],Ones*2)
+        
+        op.InputVolume.setValue( self.d6 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,99],Ones*99)
+        
+        op.InputVolume.setValue( self.d7 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,50],Ones*0)
+        
+        op.InputVolume.setValue( self.d8 )
+        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,98],Ones*99)
+        
+    def testBasicCubic(self):
+
+        Ones=np.ones((10,10))
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        
+        op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = 'linear'
+        
+        op.InputVolume.setValue( self.d1 )
+        out = op.Output[:].wait()[:,:,40]
+        self.assertAll( (out > Ones*38) & (out < Ones*42))
+        
 
 
-        assert np.any(op.Output[:].wait()[:,:,40]==Ones*41)==True
-
-        assert np.any(op.Output[:].wait()[:,:,70]==Ones*71)==True
-
-        op.InputVolume.setValue( d2 )
-        assert np.any(op.Output[:].wait()[:,:,4]==Ones*11)==True
-
-        op.InputVolume.setValue( d3 )
-        assert np.any(op.Output[:].wait()[:,:,99]==Ones*99)==True
-
-        op.InputVolume.setValue( d4 )
-        assert np.any(op.Output[:].wait()[:,:,1]==Ones*2)==True
-
-        op.InputVolume.setValue( d5 )
-        assert np.any(op.Output[:].wait()[:,:,0]==Ones*2)==True
-
-        op.InputVolume.setValue( d6 )
-        assert np.any(op.Output[:].wait()[:,:,99]==Ones*99)==True
-
-        op.InputVolume.setValue( d7 )
-        assert np.any(op.Output[:].wait()[:,:,50]==Ones*0)==True
-
-        op.InputVolume.setValue( d8 )
-        assert np.any(op.Output[:].wait()[:,:,98]==Ones*99)==True
-
-    def testAxesReversed(self):
+    def testAxesReversedLinear(self):
         d1 = self.d1.transpose()
         d2 = self.d2.transpose()
         d3 = self.d3.transpose()        
@@ -132,34 +150,34 @@ class TestInterpMissingData(object):
         op = OpInterpMissingData(graph = g)
         op.InputVolume.setValue( d1 )
         op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = 'linear'
 
-
-
-
-        assert np.any(op.Output[:].wait()[40,:,:]==Ones*41)==True
-
-        assert np.any(op.Output[:].wait()[70,:,:]==Ones*71)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[40,:,:],Ones*41)
+        
+        
+        self.assertArraysAlmostEqual(op.Output[:].wait()[70,:,:],Ones*71)
+        
         op.InputVolume.setValue( d2 )
-        assert np.any(op.Output[:].wait()[4,:,:]==Ones*11)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[4,:,:],Ones*11)
+        
         op.InputVolume.setValue( d3 )
-        assert np.any(op.Output[:].wait()[99,:,:]==Ones*99)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[99,:,:],Ones*99)
+        
         op.InputVolume.setValue( d4 )
-        assert np.any(op.Output[:].wait()[1,:,:]==Ones*2)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[1,:,:],Ones*2)
+        
         op.InputVolume.setValue( d5 )
-        assert np.any(op.Output[:].wait()[0,:,:]==Ones*2)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[0,:,:],Ones*2)
+        
         op.InputVolume.setValue( d6 )
-        assert np.any(op.Output[:].wait()[99,:,:]==Ones*99)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[99,:,:],Ones*99)
+        
         op.InputVolume.setValue( d7 )
-        assert np.any(op.Output[:].wait()[50,:,:]==Ones*0)==True
-
+        self.assertArraysAlmostEqual(op.Output[:].wait()[50,:,:],Ones*0)
+        
         op.InputVolume.setValue( d8 )
-        assert np.any(op.Output[:].wait()[98,:,:]==Ones*99)==True
+        self.assertArraysAlmostEqual(op.Output[:].wait()[98,:,:],Ones*99)
+        
 
     def testRoi(self):
         d1 = self.d1
