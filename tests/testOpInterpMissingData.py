@@ -72,6 +72,13 @@ class TestInterpMissingData(unittest.TestCase):
         for i in range(100): d8[:,:,i]*=(i+1)
         d8[:,:,98]=0
 
+        # two different linear interpolations
+        d9=vigra.taggedView(np.ones((10,10,100)), 'xyz')
+        for i in range(50): d9[:,:,i]*=(i+1)
+        for i in range(50): d9[:,:,50+i]*=2*(50+i+1)
+        d9[:,:,90] = 0
+        d9[:,:,10] = 0
+        
         self.d1 = d1
         self.d2 = d2
         self.d21 = d21
@@ -83,6 +90,7 @@ class TestInterpMissingData(unittest.TestCase):
         self.d6 = d6
         self.d7 = d7
         self.d8 = d8
+        self.d9 = d9
 
     def testBasicLinear(self):
 
@@ -131,6 +139,19 @@ class TestInterpMissingData(unittest.TestCase):
         out = op.Output[:].wait()[:,:,40]
         self.assertAll( (out > Ones*38) & (out < Ones*42))
         
+    def testMultipleMissingLinear(self):
+        Ones=np.ones((10,10))
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        
+        op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = 'linear'
+        
+        op.InputVolume.setValue( self.d9 )
+        out = op.Output[:].wait()[:,:,10]
+        self.assertArraysAlmostEqual(out, Ones*11)
+        out = op.Output[:].wait()[:,:,90]
+        self.assertArraysAlmostEqual(out, Ones*182)
 
 
     def testAxesReversedLinear(self):
@@ -189,10 +210,11 @@ class TestInterpMissingData(unittest.TestCase):
         op = OpInterpMissingData(graph = g)
         op.InputVolume.setValue( d1 )
         op.InputSearchDepth.setValue(100)
+        op.interpolationMethod = 'linear'
 
         res=op.Output(start = (0,0,35), stop = (10,10,45)).wait()
-        assert res[1,1,0]==36
-        assert res[1,1,-1]==45
+        self.assertAlmostEqual(res[1,1,0],36)
+        self.assertAlmostEqual(res[1,1,-1],45)
 
         res=op.Output(start = (0,0,30), stop = (10,10,45)).wait()
         assert res[1,1,0]==31

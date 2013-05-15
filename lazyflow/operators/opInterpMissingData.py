@@ -34,33 +34,46 @@ class OpInterpMissingData(Operator):
         #   1. Detection of missing regions
         #   2. Interpolation of each missing region
         
-        #OLD WARNING warnings.warn("FIXME: This operator should be memory-optimized using request.writeInto()")
+        warnings.warn("FIXME: This operator should be memory-optimized using request.writeInto()")
 
+        
+        #TODO if slot == interpolated data
+        #TODO if subindex is adequate
+        
         # acquire data
+        (data,original_slice) = self._getData(roi)
+        
+        
+        # determine missing indices
+        missing = self._detectMissing(data.withAxes(*'xyz').transposeToNumpyOrder())
+        
+        #TODO sanity checks
+        
+        #TODO what about close missing regions???
+        
+        #for 'missing rectangles' in missing
+        self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),missing)
+        
+        result[:] = data[original_slice]
+        return result
+    
+    
+    def propagateDirty(self, slot, subindex, roi):
+        # TODO: This implementation of propagateDirty() isn't correct.
+        #       That's okay for now, since this operator will never be used with input data that becomes dirty.
+        #TODO if the input changes we're doing nothing?
+        warnings.warn("FIXME: propagateDirty not implemented!")
+        self.Output.setDirty(roi)
+        
+    def _getData(self, roi):
         data = self.InputVolume.get(roi).wait()
         depth= self.InputSearchDepth.value
 
         data = data.view( vigra.VigraArray )
         data.axistags = self.InputVolume.meta.axistags
         
+        missing = vigra.VigraArray(data, dtype=np.uint8)
         
-        #TODO if slot == interpolated data
-        #TODO if subindex is adequate
-        
-        missing = self._detectMissing(data.withAxes(*'xyz').transposeToNumpyOrder())
-        
-        #TODO sanity checks
-        #TODO partitioning
-        
-        #for 'missing rectangles' in missing
-        self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),missing)
-        
-        result[:] = data
-        return result
-    
-        '''
-        self._interpMissingLayer(data.withAxes(*'xyz'))
-
         z_index = self.InputVolume.meta.axistags.index('z')
         n_layers = self.InputVolume.meta.getTaggedShape()['z']
 
@@ -85,9 +98,7 @@ class OpInterpMissingData(Operator):
             new_key = (slice(old_start[0], old_stop[0], None), slice(old_start[1], old_stop[1]), \
                     slice(old_start[2]-offset0, old_stop[2]))
             data = self.InputVolume[new_key].wait()
-
-
-
+        
         #   while roi bottom layer is empty, 
         #   push layer from data to bottom of roi 
         offset1=0
@@ -104,31 +115,16 @@ class OpInterpMissingData(Operator):
             new_key = (slice(old_start[0], old_stop[0], None), slice(old_start[1], old_stop[1]), \
                     slice(old_start[2]-offset0, old_stop[2]+offset1))
             data = self.InputVolume[new_key].wait()
-
-
-
-        #   apply Interpolation
-        if offset0!=0 or offset1!=0:
-            self._interpMissingLayer(data)
-
-            #   cut data to origin shape or roi
-            if offset0!=0:
-                data=data[:,:,offset0:]
-            if offset1!=0:
-                data=data[:,:,0:-offset1]
-
-
-        result[:] = data
-        return result
         
-        '''
-
-    def propagateDirty(self, slot, subindex, roi):
-        # TODO: This implementation of propagateDirty() isn't correct.
-        #       That's okay for now, since this operator will never be used with input data that becomes dirty.
-        #TODO if the input changes we're doing nothing?
-        warnings.warn("FIXME: propagateDirty not implemented!")
-        self.Output.setDirty(roi)
+        offsets = np.zeros((2,3))
+        for i in range(len(data.shape)):
+            offsets[1,i] = data.shape[i]
+        offsets[0,z_index] = offset0
+        offsets[1,z_index] -= offset1
+        
+        original_slice = tuple([slice(offsets[0,i],offsets[1,i]) for i in range(offsets.shape[1])])
+        
+        return (data,original_slice)
         
     def _interpolate(self,volume,missing, method = None):
         '''
@@ -137,7 +133,7 @@ class OpInterpMissingData(Operator):
         :type volume: array-like
         :param missing: integers greater zero where data is missing
         :type missing: uint8, 3d block with axistags 'zyx'
-        :param method: 'cubic' or 'linear'
+        :param method: 'cubic' or 'linear' or 'constant' (see class documentation)
         :type method: str
         '''
         
@@ -171,6 +167,7 @@ class OpInterpMissingData(Operator):
             xs = np.linspace(0,1,n+2)
             left = volume[minind,...]
             right = volume[maxind,...]
+            
            
             for i in range(n):
                 # interpolate every slice
@@ -190,7 +187,6 @@ class OpInterpMissingData(Operator):
                 x = xs[i+1]
                 volume[minind+i+2,...] = _spline_mat(A0, A1, A2, A3, x, x**2, x**3)
         else: #constant
-            print(minind,maxind)
             if minind > 0:
                 # fill right hand side with last good slice
                 for i in range(maxind-minind+1):
@@ -204,104 +200,29 @@ class OpInterpMissingData(Operator):
             else:
                 # nothing to do for empty block
                 pass
-                
-
-    '''
-    def _interpMissingLayer(self, data):
-        """
-        Description: Interpolates empty layers and stacks of layers in which all values are zero.
-
-        :param data: Must be 3d, in xyz order.
-        """
-        #TODO determine empty layer by NaNs
-        #TODO 
-        assert len(data.shape)==3
-        
-        fl=data.sum(0).sum(0)==0 #False Layer Array
-
-        #Interpolate First Block
-        if fl[0]==1:
-            for i in range(fl.shape[0]):
-                if fl[i]==0:
-                    data[:,:,0:i+1]=self._firstBlock(data[:,:,0:i+1])
-                    break
-
-
-        #Interpolate Center Layers
-        pos0=0
-        pos1=0
-        for i in range(1,fl.shape[0]-1):
-            if fl[i]==1:
-                if fl[i-1]==0:
-                    pos0=i-1
-                if fl[i+1]==0:
-                    pos1=i+1
-                if pos1!=0:
-                    data[:,:,pos0:pos1+1]=self._centerBlock(data[:,:,pos0:pos1+1])
-                pos1=0
-
-
-        #Interpolate Last Block 
-        if fl[fl.shape[0]-1]==1:
-            for i in range(fl.shape[0]):
-                i_rev=fl.shape[0]-i-1
-                if fl[i_rev]==0:
-                    data[:,:,i_rev:data.shape[2]]=self._lastBlock(data[:,:,i_rev:data.shape[2]])
-                    break
-
-    def _firstBlock(self,data):
-        """
-        Description: set the values of the first few empty layers to these of the first correct one
-
-                     [first correct layer]
-                            |
-                     e.g 000764 --> 777764
-
-        :param data: Must be 3d, in xyz order.
-        """
-        for i in range(data.shape[2]-1):
-            data[:,:,i]=data[:,:,data.shape[2]-1]
-        return data
-
-    def _centerBlock(self,sub_data):
-        """
-        Description: interpolates all layers between the first and the last slices
-
-                     e.g 80004 --> 87654
-
-        :param sub_data: Must be 3d, in xyz order.
-        """
-        sub_data = sub_data.transpose()
-        Total=sub_data.shape[0]-1
-        L_0=np.array(sub_data[0,:,:], dtype=np.float32)
-        L_1=np.array(sub_data[Total,:,:], dtype=np.float32) 
-        for t in range(Total+1):
-            Layer=(L_1*t+L_0*(Total-t))/Total  
-            sub_data[t,:,:]=Layer
-        return sub_data.transpose()
-
-    def _lastBlock(self,data):
-        """
-        Description: set the values of the last few empty layers to these of the last correct one
-
-                     [last correct layer]
-                            |
-                     e.g. 467000 --> 467777
-
-        :param data: Must be 3d, in xyz order.
-        """
-        for i in range(data.shape[2]):
-            data[:,:,i]=data[:,:,0]
-        return data
-        
-    '''
 
     def _detectMissing(self, data):
+        '''
+        detects missing regions and labels each missing region with 
+        its own integer value
+        :param data: 3d data with z as first axis
+        :type data: array-like
+        :returns: 3d integer block with non-zero integers for missing values
+        
+        TODO This method just marks whole slices as missing, should be done for 
+        smaller regions, too
+        '''
         missing = np.zeros(data.shape, dtype=np.uint8)
-        
+        missingInt = 0
+        wasMissing = False
         for i in range(data.shape[0]):
-            missing[i,...] = 1 if self.isMissing(data[i,...]) else 0
-        
+            if self.isMissing(data[i,...]):
+                if not wasMissing:
+                    missingInt += 1
+                wasMissing = True
+                missing[i,...] = missingInt 
+            else:
+                wasMissing = False
         return missing
     
     def isMissing(self,data):
