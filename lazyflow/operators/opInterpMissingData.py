@@ -50,9 +50,10 @@ class OpInterpMissingData(Operator):
         #TODO sanity checks
         
         #TODO what about close missing regions???
-        
-        #for 'missing rectangles' in missing
-        self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),missing)
+        for i in range(1,missing.max()+1):
+            newmissing = np.zeros(missing.shape)
+            newmissing[missing == i] = 1
+            self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),newmissing)
         
         result[:] = data[original_slice]
         return result
