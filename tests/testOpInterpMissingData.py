@@ -8,8 +8,8 @@ import unittest
 
 class TestInterpMissingData(unittest.TestCase):
     
-    def assertArraysAlmostEqual(self,a,b):
-        if not np.mean((a-b)**2)<1e-7:
+    def assertArraysAlmostEqual(self,a,b,msediff=1e-7):
+        if not np.mean((a-b)**2) < msediff:
             self.fail("\n" + str(a) + "\n\n != \n\n" + str(b) + "\n")
             
     def assertAll(self,b):
@@ -25,42 +25,42 @@ class TestInterpMissingData(unittest.TestCase):
         d1[:,:,70]=0
 
         #Fist block is empty
-        d2=np.ones((10,10,100))
+        d2=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d2[:,:,i]*=(i+1)
         d2[:,:,0:10]=0
 
-        d21=np.ones((10,10,100))
+        d21=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d21[:,:,i]*=(i+1)
         d21[:,:,0:10]=0
 
-        d22=np.ones((10,10,100))
+        d22=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d22[:,:,i]*=(i+1)
         d22[:,:,0:10]=0
 
 
 
-        d23=np.ones((10,10,100))
+        d23=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d23[:,:,i]*=(i+1)
         d23[:,:,0:10]=0
 
 
         #Last layer is empty
-        d3=np.ones((10,10,100))
+        d3=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d3[:,:,i]*=(i+1)
         d3[:,:,99]=0
 
         #Second layer is empty
-        d4=np.ones((10,10,100))
+        d4=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d4[:,:,i]*=(i+1)
         d4[:,:,1]=0
 
         #First layer is empty
-        d5=np.ones((10,10,100))
+        d5=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d5[:,:,i]*=(i+1)
         d5[:,:,0]=0
 
         #Last layer empty
-        d6=np.ones((10,10,100))
+        d6=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d6[:,:,i]*=(i+1)
         d6[:,:,99]=0
 
@@ -68,12 +68,12 @@ class TestInterpMissingData(unittest.TestCase):
         d7=np.zeros((10,10,100))
 
         #next to the layer is empty
-        d8=np.ones((10,10,100))
+        d8=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(100): d8[:,:,i]*=(i+1)
         d8[:,:,98]=0
 
         # two different linear interpolations
-        d9=vigra.taggedView(np.ones((10,10,100)), 'xyz')
+        d9=vigra.VigraArray( np.ones((10,10,100)), axistags=vigra.defaultAxistags('xyz') )
         for i in range(50): d9[:,:,i]*=(i+1)
         for i in range(50): d9[:,:,50+i]*=2*(50+i+1)
         d9[:,:,90] = 0
@@ -213,46 +213,46 @@ class TestInterpMissingData(unittest.TestCase):
         op.interpolationMethod = 'linear'
 
         res=op.Output(start = (0,0,35), stop = (10,10,45)).wait()
-        self.assertAlmostEqual(res[1,1,0],36)
-        self.assertAlmostEqual(res[1,1,-1],45)
-
+        self.assertArraysAlmostEqual(res[1,1,0],36)
+        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        
         res=op.Output(start = (0,0,30), stop = (10,10,45)).wait()
-        assert res[1,1,0]==31
-        assert res[1,1,-1]==45
-
+        self.assertArraysAlmostEqual(res[1,1,0],31)
+        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        
         res=op.Output(start = (0,0,29), stop = (10,10,45)).wait()
-        assert res[1,1,0]==30
-        assert res[1,1,-1]==45
-
+        self.assertArraysAlmostEqual(res[1,1,0],30)
+        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        
         res=op.Output(start = (0,0,0), stop = (10,10,45)).wait()
-        assert res[1,1,0]==1
-        assert res[1,1,-1]==45
-
+        self.assertArraysAlmostEqual(res[1,1,0],1)
+        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        
         res=op.Output(start = (0,0,0), stop = (10,10,50)).wait()
-        assert res[1,1,0]==1
-        assert res[1,1,-1]==50
-
+        self.assertArraysAlmostEqual(res[1,1,0],1)
+        self.assertArraysAlmostEqual(res[1,1,-1],50)
+        
         res=op.Output(start = (0,0,35), stop = (10,10,51)).wait()
-        assert res[1,1,0]==36
-        assert res[1,1,-1]==51
-
+        self.assertArraysAlmostEqual(res[1,1,0],36)
+        self.assertArraysAlmostEqual(res[1,1,-1],51)
+        
         res=op.Output(start = (0,0,35), stop = (10,10,70)).wait()
-        assert res[1,1,0]==36
-        assert res[1,1,-1]==70
+        self.assertArraysAlmostEqual(res[1,1,0],36)
+        self.assertArraysAlmostEqual(res[1,1,-1],70)
 
         op.InputVolume.setValue( d21 )
         res=op.Output(start = (0,0,0), stop = (10,10,20)).wait()
-        assert res[1,1,3]==11
+        self.assertArraysAlmostEqual(res[1,1,3],11)
 
         op.InputVolume.setValue( d22 )
         res=op.Output(start = (0,0,0), stop = (10,10,6)).wait()
-        assert res[1,1,0]==11
-        assert res[1,1,-1]==11
+        self.assertArraysAlmostEqual(res[1,1,0],11)
+        self.assertArraysAlmostEqual(res[1,1,-1],11)
 
         op.InputVolume.setValue( d23 )
         res=op.Output(start = (0,0,1), stop = (10,10,2)).wait()
-        assert res[1,1,0]==11
-        assert res[1,1,-1]==11
+        self.assertArraysAlmostEqual(res[1,1,0],11)
+        self.assertArraysAlmostEqual(res[1,1,-1],11)
 
     def testdepthsearch(self):
         d1 = self.d1
