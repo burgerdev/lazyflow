@@ -138,6 +138,8 @@ class OpInterpMissingData(Operator):
         :type method: str
         '''
         
+        #method = 'linear' if method == 'cubic' else method
+        
         method = self.interpolationMethod if method is None else method
         # sanity checks
         assert method in self._requiredMargin.keys(), "Unknown method '{}'".format(method)

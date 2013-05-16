@@ -5,12 +5,155 @@ import vigra
 from lazyflow.operators.opInterpMissingData import OpInterpMissingData
 
 import unittest
+from numpy.testing import assert_array_almost_equal, assert_array_equal
+
+
+np.set_printoptions(precision=3, linewidth=200)
+
+_testDescriptions = ['large block empty', 'single layer empty', 'last layer empty', 'first block empty', \
+                    #'second to last layer empty', 'second layer empty', 'first layer empty', \
+                    #'multiple blocks empty', 'all layers empty', 'different regions empty', \
+                    ]
+
+
+
+def _getTestVolume(description, method):
+    
+    if description == 'large block empty':
+        expected_output = _volume(nz=100, method=method)
+        volume = vigra.VigraArray(expected_output)
+        missing = vigra.VigraArray(expected_output, dtype=np.uint8)
+        volume[:,:,30:50] = 0
+        missing[:] = 0
+        missing[:,:,30:50] = 1
+    elif description == 'single layer empty':
+        (volume, missing, expected_output) = _singleMissingLayer(layer=30)
+    elif description == 'last layer empty':
+        (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=99)
+    elif description == 'second to last layer empty':
+        (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=98)
+    elif description == 'first layer empty':
+        (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=0)
+    elif description == 'second layer empty':
+        (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=1)
+    elif description == 'first block empty':
+        expected_output = _volume(method=method)
+        volume = vigra.VigraArray(expected_output)
+        missing = vigra.VigraArray(expected_output, dtype=np.uint8)
+        volume[:,:,0:10] = 0
+        missing[:] = 0
+        missing[:,:,0:10] = 1
+    elif description == '':
+        pass    
+    elif description == '':
+        pass
+    else:
+        raise NotImplementedError("test cube '{}' not available.".format(description))
+    
+    return (volume, missing, expected_output)
+
+def _volume(nx=10,ny=10,nz=100,method='linear'):
+    b = vigra.VigraArray( np.ones((nx,ny,nz)), axistags=vigra.defaultAxistags('xyz') )
+    if method == 'linear':
+        for i in range(b.shape[2]): b[:,:,i]*=(i+1)
+    elif method == 'cubic':
+        s = nz/3
+        for z in range(b.shape[2]): b[:,:,z]= (z-s)**2*z*250.0/(nz*(nz-s)**2) + 1
+    elif method == 'constant':
+        b[:] = 124
+    else:
+        raise NotImplementedError("unknown method '{}'.".format(method))
+    
+    return b
+
+def _singleMissingLayer(layer=30, nx=10,ny=10,nz=100,method='linear'):
+    expected_output = _volume(nx=nx, ny=ny, nz=nz, method=method)
+    volume = vigra.VigraArray(expected_output)
+    missing = vigra.VigraArray(expected_output, dtype=np.uint8)
+    volume[:,:,layer] = 0
+    missing[:] = 0
+    missing[:,:,layer] = 1 
+    return (volume, missing, expected_output)
+
+
+
+
+class TestInterpolation(unittest.TestCase):
+    '''
+    tests for the interpolation
+    '''
+    
+    
+    def setUp(self):
+        pass
+    
+    def testLinearAlgorithm(self):
+        pass
+    
+    def testCubicAlgorithm(self):
+        (v,m,e) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=20,method='cubic')
+        interpolationMethod = 'cubic'
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = interpolationMethod
+        op.InputVolume.setValue( v )
+        assert_array_almost_equal(op.Output[:].wait()[:].view(np.ndarray), e.view(np.ndarray)[:], decimal=1, err_msg="method='{}', test='{}'".format(interpolationMethod, 'simple cubic interpolation'))
+    
+
 
 class TestInterpMissingData(unittest.TestCase):
+    '''
+    tests for the whole detection/interpolation workflow
+    '''
     
-    def assertArraysAlmostEqual(self,a,b,msediff=1e-7):
-        if not np.mean((a-b)**2) < msediff:
-            self.fail("\n" + str(a) + "\n\n != \n\n" + str(b) + "\n")
+    
+    def setUp(self):
+        
+        pass
+    
+    def testLinearBasics(self):
+        
+        interpolationMethod = 'linear'
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = interpolationMethod
+
+        for desc in _testDescriptions:
+            (volume, _, expected) = _getTestVolume(desc, interpolationMethod)
+            op.InputVolume.setValue( volume )
+            assert_array_almost_equal(op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
+        
+    
+    def testCubicBasics(self):
+        interpolationMethod = 'cubic'
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        op.InputSearchDepth.setValue(0)
+        op.interpolationMethod = interpolationMethod
+
+        for desc in _testDescriptions:
+            (volume, _, expected) = _getTestVolume(desc, interpolationMethod)
+            op.InputVolume.setValue( volume )
+            assert_array_almost_equal(op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
+        
+    
+    def testBoundaryCases(self):
+        pass
+    
+    def testSwappedAxes(self):
+        pass
+    
+    def testRoi(self):
+        pass
+    
+    
+
+class Old(unittest.TestCase):
+    
+    def assertArraysAlmostEqual(self,a,b):
+        assert_array_almost_equal(a,b,decimal=5)
             
     def assertAll(self,b):
         if not np.all(b):
@@ -286,3 +429,5 @@ if __name__ == "__main__":
     sys.argv.append("--nologcapture") # Don't set the logging level to DEBUG.  Leave it alone.
     ret = nose.run(defaultTest=__file__)
     if not ret: sys.exit(1)
+    
+
