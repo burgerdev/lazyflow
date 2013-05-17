@@ -182,7 +182,7 @@ class OpInterpMissingData(Operator):
             F1 = volume[minind+1,...]
             F2 = volume[maxind-1,...]
             F3 = volume[maxind,...]
-            (A0,A1,A2,A3) = _cubic_coeffs_mat(F0,F1,F2,F3)
+            (A0,A1,A2,A3) = _cubic_coeffs_mat(F0,F1,F2,F3,n)
             
             xs = np.linspace(0,1,n+2)
             for i in range(n):
@@ -248,18 +248,27 @@ class OpInterpMissingData(Operator):
 def _spline(a0, a1, a2, a3, x, x2, x3):
     return a0+a1*x+a2*x2+a3*x3
 
-def _cubic_coeffs(f,g,h,i):
+def _cubic_coeffs(f,g,h,i,n=1):
     '''
     cubic interpolation coefficients of vector (x is missing, o is arbitrary)
     oooooofgxxxhioooo
+            |||
+             n times
     '''
-    # CubicInterpolationMatrix = np.matrix("0, 1, 0, 0;-1, 1, 0, 0; 2, -5, 4, -1;-1, 3, -3, 1")
-    #a = g
-    #b = -f+g
-    #c = 2*f-5*g+4*h-i
-    #d = -f+3*g-3*h+i
     
-    return (g,g-f,2*f-5*g+4*h-i,-f+3*g-3*h+i)
+    n = float(n)
+    '''
+    dg = (g-f)/(n+1)
+    dh = (i-h)/(n+1)
+    
+    return (g,dg,-3*g-2*dg+3*h-dh,2*g+dg-2*h+dh)
+    '''
+    # more natural approach:
+    x = [-1/(n+1), 0, 1, (n+2)/(n+1)]
+    A = np.fliplr(np.vander(x))
+    y = np.linalg.solve(A,[f,g,h,i])
+    return (y[0],y[1],y[2],y[3])
+    
     
 _spline_mat = np.vectorize(_spline, otypes=[np.float])
 _cubic_coeffs_mat = np.vectorize(_cubic_coeffs, otypes=[np.float,np.float,np.float,np.float])

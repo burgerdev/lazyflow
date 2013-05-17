@@ -7,14 +7,15 @@ from lazyflow.operators.opInterpMissingData import OpInterpMissingData
 import unittest
 from numpy.testing import assert_array_almost_equal, assert_array_equal
 
+from scipy.interpolate import UnivariateSpline
 
-np.set_printoptions(precision=3, linewidth=200)
+
+np.set_printoptions(precision=3, linewidth=80)
 
 _testDescriptions = ['large block empty', 'single layer empty', 'last layer empty', 'first block empty', \
                     #'second to last layer empty', 'second layer empty', 'first layer empty', \
                     #'multiple blocks empty', 'all layers empty', 'different regions empty', \
                     ]
-
 
 
 def _getTestVolume(description, method):
@@ -91,14 +92,32 @@ class TestInterpolation(unittest.TestCase):
         pass
     
     def testCubicAlgorithm(self):
-        (v,m,e) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=20,method='cubic')
+        (v,m,orig) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='cubic')
+        v[:,:,10:15] = 0
+        m[:,:,10:15] = 1
         interpolationMethod = 'cubic'
         g=Graph()
         op = OpInterpMissingData(graph = g)
         op.InputSearchDepth.setValue(0)
         op.interpolationMethod = interpolationMethod
         op.InputVolume.setValue( v )
-        assert_array_almost_equal(op.Output[:].wait()[:].view(np.ndarray), e.view(np.ndarray)[:], decimal=1, err_msg="method='{}', test='{}'".format(interpolationMethod, 'simple cubic interpolation'))
+        
+        # natural comparison
+        assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
+                                orig[:,:,10:15].view(np.ndarray), decimal=3,\
+                                err_msg="direct comparison to cubic data")
+        
+        # scipy spline interpolation
+        x = np.zeros(v.shape)
+        x[:,:,:] = np.arange(v.shape[2])
+        (i,j,k) = np.where(m==0)
+        xs = x[i,j,k]
+        ys = v.view(np.ndarray)[i,j,k]
+        spline = UnivariateSpline(x[:,:,[8, 9, 16, 17]], v[:,:,[8,9,16,17]], k=3, s=0)
+        e = spline(np.arange(v.shape[2]))
+        
+        assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].squeeze().view(np.ndarray),\
+                                e[10:15], decimal=3, err_msg="scipy.interpolate.UnivariateSpline comparison")
     
 
 
