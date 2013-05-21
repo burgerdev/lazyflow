@@ -2,7 +2,8 @@ from lazyflow.graph import Graph
 
 import numpy as np
 import vigra
-from lazyflow.operators.opInterpMissingData import OpInterpMissingData
+from lazyflow.operators.opInterpMissingData import OpInterpMissingData, \
+        OpInterpolate, OpDetectMissing
 
 import unittest
 from numpy.testing import assert_array_almost_equal, assert_array_equal
@@ -77,8 +78,16 @@ def _singleMissingLayer(layer=30, nx=10,ny=10,nz=100,method='linear'):
     return (volume, missing, expected_output)
 
 
-
-
+class TestDetection(unittest.TestCase):
+    def setUp(self):
+        pass
+    
+    def testLinearAlgorithm(self):
+        pass
+    
+    def testCubicAlgorithm(self):
+        pass
+    
 class TestInterpolation(unittest.TestCase):
     '''
     tests for the interpolation
@@ -89,6 +98,21 @@ class TestInterpolation(unittest.TestCase):
         pass
     
     def testLinearAlgorithm(self):
+        (v,m,orig) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
+        v[:,:,10:15] = 0
+        m[:,:,10:15] = 1
+        interpolationMethod = 'linear'
+        g=Graph()
+        op = OpInterpolate(graph = g)
+        op.InputVolume.setValue(v)
+        op.Missing.setValue(m)
+        op.interpolationMethod = interpolationMethod
+        op.InputVolume.setValue( v )
+        
+        assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
+                                orig[:,:,10:15].view(np.ndarray), decimal=3,\
+                                err_msg="direct comparison to linear data")
+        
         pass
     
     def testCubicAlgorithm(self):
