@@ -14,7 +14,26 @@ class OpInterpMissingData(Operator):
     
     interpolationMethod = 'cubic'
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
-    _fallbacks = {'cubic': 'linear', 'linear': 'constant', 'constant': None}
+    
+    def __init__(self, *args, **kwargs):
+        super(OpInterpMissingData, self).__init__(*args, **kwargs)
+        
+        self.detector = OpDetectMissing(parent=self)
+        self.interpolator = OpInterpolate(parent=self)
+        self.interpolator.interpolationMethod = self.interpolationMethod
+        
+        self.detector.InputVolume.connect(self.InputVolume)
+        self.detector.InputSearchDepth.connect(self.InputSearchDepth)
+        self.interpolator.InputVolume.connect(self.InputVolume)
+        self.interpolator.Missing.connect(self.detector.Output)
+        
+        self.InputSearchDepth.setValue(0)
+        
+        #self.Output.connect(self.interpolator.Output)
+        
+        
+        
+
 
     def setupOutputs(self):
         # Output has the same shape/axes/dtype/drange as input
@@ -29,33 +48,7 @@ class OpInterpMissingData(Operator):
             assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
 
     def execute(self, slot, subindex, roi, result):
-        
-        # we want to interpolate in two steps
-        #   1. Detection of missing regions
-        #   2. Interpolation of each missing region
-        
-        warnings.warn("FIXME: This operator should be memory-optimized using request.writeInto()")
-
-        
-        #TODO if slot == interpolated data
-        #TODO if subindex is adequate
-        
-        # acquire data
-        (data,original_slice) = self._getData(roi)
-        
-        
-        # determine missing indices
-        missing = self._detectMissing(data.withAxes(*'xyz').transposeToNumpyOrder())
-        
-        #TODO sanity checks
-        
-        #TODO what about close missing regions???
-        for i in range(1,missing.max()+1):
-            newmissing = np.zeros(missing.shape)
-            newmissing[missing == i] = 1
-            self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),newmissing)
-        
-        result[:] = data[original_slice]
+        result[:] = self.interpolator.Output.get(roi).wait()
         return result
     
     
@@ -205,40 +198,7 @@ class OpInterpMissingData(Operator):
                 # nothing to do for empty block
                 pass
 
-    def _detectMissing(self, data):
-        '''
-        detects missing regions and labels each missing region with 
-        its own integer value
-        :param data: 3d data with z as first axis
-        :type data: array-like
-        :returns: 3d integer block with non-zero integers for missing values
-        
-        TODO This method just marks whole slices as missing, should be done for 
-        smaller regions, too
-        '''
-        missing = np.zeros(data.shape, dtype=np.uint8)
-        missingInt = 0
-        wasMissing = False
-        for i in range(data.shape[0]):
-            if self.isMissing(data[i,...]):
-                if not wasMissing:
-                    missingInt += 1
-                wasMissing = True
-                missing[i,...] = missingInt 
-            else:
-                wasMissing = False
-        return missing
     
-    def isMissing(self,data):
-        """
-        determines if data is missing values or not
-        
-        :param data: a 2-D slice
-        :type data: array-like
-        :returns: bool - -True, if data seems to be missing
-        """
-        #TODO this could be done much better
-        return np.sum(data)==0
     
     
     
@@ -311,10 +271,11 @@ class OpInterpolate(Operator):
 
     def execute(self, slot, subindex, roi, result):
         data = self.InputVolume.get(roi).wait()
+        data = vigra.VigraArray(data, axistags=self.InputVolume.meta.axistags)
         missing = self.Missing.get(roi).wait()
         #TODO what about close missing regions???
         for i in range(1,missing.max()+1):
-            newmissing = vigra.VigraArray(np.zeros(missing.shape), axistags=missing.axistags)
+            newmissing = vigra.VigraArray(np.zeros(missing.shape), axistags=self.InputVolume.meta.axistags)
             newmissing[missing == i] = 1
             self._interpolate(data.withAxes(*'zyx'),newmissing.withAxes(*'zyx'))
         
@@ -406,7 +367,11 @@ class OpInterpolate(Operator):
     
 class OpDetectMissing(Operator):
     InputVolume = InputSlot()
+    InputSearchDepth = InputSlot()
     Output = OutputSlot()
+    
+    def __init__(self, *args, **kwargs):
+        super(OpDetectMissing, self).__init__(*args, **kwargs)
     
     def propagateDirty(self, slot, subindex, roi):
         # TODO
@@ -414,21 +379,60 @@ class OpDetectMissing(Operator):
         self.Output.setDirty(roi)
     
     def setupOutputs(self):
-        # Output has the same shape/axes/dtype/drange as input
         self.Output.meta.assignFrom( self.InputVolume.meta )
-        self.Output.meta.dtype = np.uint8
-        ''' not neccessary
-        # Check for errors
-        taggedShape = self.InputVolume.meta.getTaggedShape()
-        if 't' in taggedShape:
-            assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
-        if 'c' in taggedShape:
-            assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
-        '''
+        self.Output.meta.dtype = np.uint32
+
 
     def execute(self, slot, subindex, roi, result):
-        result[:] = 0
+        
+        # acquire data
+        data = self.InputVolume.get(roi).wait()
+        
+        data = vigra.VigraArray(data, axistags=self.InputVolume.meta.axistags)
+        
+        # determine missing indices
+        missing = self._detectMissing(data.transposeToNumpyOrder())
+        
+        #TODO missing has wrong shape
+        
+        va = result.view(type=vigra.VigraArray)
+        va.copyValues(missing)
         return result
+        
+    def _detectMissing(self, data):
+        '''
+        detects missing regions and labels each missing region with 
+        its own integer value
+        :param data: 3d data with z as first axis
+        :type data: array-like
+        :returns: 3d integer block with non-zero integers for missing values
+        
+        TODO This method just marks whole slices as missing, should be done for 
+        smaller regions, too
+        '''
+        missing = vigra.VigraArray(np.zeros(data.shape, dtype=np.uint8), axistags=self.InputVolume.meta.axistags)
+        missingInt = 0
+        wasMissing = False
+        for i in range(data.shape[0]):
+            if self.isMissing(data[i,...]):
+                if not wasMissing:
+                    missingInt += 1
+                wasMissing = True
+                missing[i,...] = missingInt 
+            else:
+                wasMissing = False
+        return missing
+    
+    def isMissing(self,data):
+        """
+        determines if data is missing values or not
+        
+        :param data: a 2-D slice
+        :type data: array-like
+        :returns: bool - -True, if data seems to be missing
+        """
+        #TODO this could be done much better
+        return np.sum(data)==0
 
 if __name__ == "__main__":
     pass

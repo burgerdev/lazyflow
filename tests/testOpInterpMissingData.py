@@ -80,14 +80,14 @@ def _singleMissingLayer(layer=30, nx=10,ny=10,nz=100,method='linear'):
 
 class TestDetection(unittest.TestCase):
     def setUp(self):
-        pass
+        self.op = OpDetectMissing(graph=Graph())
+        self.op.InputSearchDepth.setValue(0)
     
     def testSingleMissingLayer(self):
         (v,m,_) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
-        op = OpDetectMissing(graph=Graph())
-        op.InputVolume.setValue(v)
+        self.op.InputVolume.setValue(v)
         
-        assert_array_equal(op.Output[:].wait().view(type=np.ndarray),\
+        assert_array_equal(self.op.Output[:].wait().view(type=np.ndarray),\
                                 m.view(type=np.ndarray),\
                                 err_msg="input with single black layer")
                             
@@ -95,12 +95,12 @@ class TestDetection(unittest.TestCase):
         (v,m,_) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
         (v2,m2,_) = _singleMissingLayer(layer=35, nx=1,ny=1,nz=50,method='linear')
         m2[np.where(m2==1)] = 2
-        op = OpDetectMissing(graph=Graph())
-        op.InputVolume.setValue(np.sqrt(v*v2))
+        self.op.InputVolume.setValue(np.sqrt(v*v2))
         
-        assert_array_equal(op.Output[:].wait().view(type=np.ndarray),\
+        assert_array_equal(self.op.Output[:].wait().view(type=np.ndarray),\
                                 (m+m2).view(type=np.ndarray),\
                                 err_msg="input with two black layers")
+
     
 class TestInterpolation(unittest.TestCase):
     '''
