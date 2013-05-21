@@ -274,6 +274,12 @@ def _cubic_coeffs(f,g,h,i,n=1):
 _spline_mat = np.vectorize(_spline, otypes=[np.float])
 _cubic_coeffs_mat = np.vectorize(_cubic_coeffs, otypes=[np.float,np.float,np.float,np.float])
 
+
+
+##############################
+### Interpolation Operator ###
+##############################
+
 class OpInterpolate(Operator):
     InputVolume = InputSlot()
     Missing = InputSlot()
@@ -294,23 +300,23 @@ class OpInterpolate(Operator):
 
         assert self.InputVolume.meta.getTaggedShape() == self.Missing.meta.getTaggedShape(), \
                 "InputVolume and Missing must have the same shape"
+            
         # Check for errors
-        for taggedShape in [self.InputVolume.meta.getTaggedShape(),\
-                            self.Missing.meta.getTaggedShape()]:
-            if 't' in taggedShape:
-                assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
-            if 'c' in taggedShape:
-                assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
+        taggedShape = self.InputVolume.meta.getTaggedShape()
+        if 't' in taggedShape:
+            assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
+        if 'c' in taggedShape:
+            assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
+        
 
     def execute(self, slot, subindex, roi, result):
         data = self.InputVolume.get(roi).wait()
         missing = self.Missing.get(roi).wait()
         #TODO what about close missing regions???
         for i in range(1,missing.max()+1):
-            newmissing = np.zeros(missing.shape)
+            newmissing = vigra.VigraArray(np.zeros(missing.shape), axistags=missing.axistags)
             newmissing[missing == i] = 1
-            #TODO transposeTo does fail somehow
-            self._interpolate(data.withAxes(*'xyz').transposeToNumpyOrder(),newmissing)
+            self._interpolate(data.withAxes(*'zyx'),newmissing.withAxes(*'zyx'))
         
         result[:] = data
         return result
@@ -343,8 +349,6 @@ class OpInterpolate(Operator):
         maxind = black_z_ind.max() + self._requiredMargin[method]
         
         n = maxind-minind-2*self._requiredMargin[method]+1
-        
-        print(missing.shape)
         
         if not (minind>-1 and maxind < volume.shape[0]):
             # this method is not applicable, try another one
@@ -394,9 +398,37 @@ class OpInterpolate(Operator):
             else:
                 # nothing to do for empty block
                 pass
+            
+            
+##########################
+### Detection Operator ###
+##########################
     
 class OpDetectMissing(Operator):
-    pass
+    InputVolume = InputSlot()
+    Output = OutputSlot()
+    
+    def propagateDirty(self, slot, subindex, roi):
+        # TODO
+        warnings.warn("FIXME: propagateDirty not implemented!")
+        self.Output.setDirty(roi)
+    
+    def setupOutputs(self):
+        # Output has the same shape/axes/dtype/drange as input
+        self.Output.meta.assignFrom( self.InputVolume.meta )
+        self.Output.meta.dtype = np.uint8
+        ''' not neccessary
+        # Check for errors
+        taggedShape = self.InputVolume.meta.getTaggedShape()
+        if 't' in taggedShape:
+            assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
+        if 'c' in taggedShape:
+            assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
+        '''
+
+    def execute(self, slot, subindex, roi, result):
+        result[:] = 0
+        return result
 
 if __name__ == "__main__":
     pass
