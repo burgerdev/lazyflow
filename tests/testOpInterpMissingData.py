@@ -156,6 +156,17 @@ class TestInterpolation(unittest.TestCase):
         
         assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].squeeze().view(np.ndarray),\
                                 e[10:15], decimal=3, err_msg="scipy.interpolate.UnivariateSpline comparison")
+                                
+    def testSingletonDims(self):
+        v = vigra.VigraArray(np.zeros((20,20,20,1)), axistags=vigra.defaultAxistags('xyzt'))
+        (v[:,:,:,0],m,orig) = _singleMissingLayer(layer=15, nx=20,ny=20,nz=20,method='cubic')
+        op = OpInterpMissingData(graph = Graph())
+        op.InputSearchDepth.setValue(0)
+        op.InputVolume.setValue( v )
+        
+        
+        s = op.Output[:].wait()
+        
     
 
 
