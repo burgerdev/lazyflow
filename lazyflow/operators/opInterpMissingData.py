@@ -5,6 +5,8 @@ import vigra
 
 
 
+
+
 class OpInterpMissingData(Operator):
     name = "OpInterpMissingData"
 
@@ -76,34 +78,85 @@ class OpInterpMissingData(Operator):
 ### Interpolation Operator ###
 ##############################
 
+def _cubic_mat(n=1):
+    n = float(n)
+    n1 = n+1
+    n2 = (n+1)*(n+1)
+    n3 = n2*(n+1)
+    non = (n+2)/(n+1)
+    non2 = non*non
+    non3 = non2*non
+    A = [[1, -1/n1, 1/n2, -1/n3],\
+        [1, 0, 0, 0],\
+        [1, 1, 1, 1],\
+        [1, non, non2, non3]]
+    
+    return np.linalg.inv(A)
+
+def _cubic_coeffs_mat(f,g,h,i,n=1):
+    A = _cubic_mat(n)
+    D = np.zeros((f.shape[0], f.shape[1], 4))
+    D[...,0] = f
+    D[...,1] = g
+    D[...,2] = h
+    D[...,3] = i
+    F = np.tensordot(D,A,([2,],[1]))
+    
+    return (F[...,0], F[...,1], F[...,2], F[...,3])
+    
 
 def _spline(a0, a1, a2, a3, x, x2, x3):
     return a0+a1*x+a2*x2+a3*x3
 
-def _cubic_coeffs(f,g,h,i,n=1):
-    '''
-    cubic interpolation coefficients of vector (x is missing, o is arbitrary)
-    oooooofgxxxhioooo
-            |||
-             n times
-    '''
-    
-    n = float(n)
-    '''
-    dg = (g-f)/(n+1)
-    dh = (i-h)/(n+1)
-    
-    return (g,dg,-3*g-2*dg+3*h-dh,2*g+dg-2*h+dh)
-    '''
-    # more natural approach:
-    x = [-1/(n+1), 0, 1, (n+2)/(n+1)]
-    A = np.fliplr(np.vander(x))
-    y = np.linalg.solve(A,[f,g,h,i])
-    return (y[0],y[1],y[2],y[3])
-    
-    
 _spline_mat = np.vectorize(_spline, otypes=[np.float])
-_cubic_coeffs_mat = np.vectorize(_cubic_coeffs, otypes=[np.float,np.float,np.float,np.float])
+
+
+#def _cubic_coeffs(f,g,h,i,n=1):
+    #'''
+    #cubic interpolation coefficients of vector (x is missing, o is arbitrary)
+    #oooooofgxxxhioooo
+            #|||
+             #n times
+    #'''
+    
+    #n = float(n)
+    #'''
+    #dg = (g-f)/(n+1)
+    #dh = (i-h)/(n+1)
+    
+    #return (g,dg,-3*g-2*dg+3*h-dh,2*g+dg-2*h+dh)
+    #'''
+    ## more natural approach:
+    
+    #if n < _inv_A.shape[0]:
+        #y = np.inner(_inv_A[n,...], [f,g,h,i])
+    #else:
+    ##x = [-1/(n+1), 0, 1, (n+2)/(n+1)]
+        #n1 = n+1
+        #n2 = (n+1)*(n+1)
+        #n3 = n2*(n+1)
+        #non = (n+2)/(n+1)
+        #non2 = non*non
+        #non3 = non2*non
+        #A = [[1, -1/n1, 1/n2, -1/n3],\
+            #[1, 0, 0, 0],\
+            #[1, 1, 1, 1],\
+            #[1, non, non2, non3]]
+        #y = np.linalg.solve(A,[f,g,h,i])
+    #return (y[0],y[1],y[2],y[3])
+    
+    
+
+#_cubic_coeffs_mat = np.vectorize(_cubic_coeffs, otypes=[np.float,np.float,np.float,np.float])
+
+#_inv_A = np.array([
+    #np.eye(4),
+    #[[0.,1.,0.,0.],
+ #[-1.,0.33333333,1.,-0.33333333],
+ #[ 1.66666667, -2.66666667,  1.33333333, -0.33333333],
+ #[-0.66666667,  1.33333333, -1.33333333,  0.66666667]]
+    #])
+    
 
 
 class OpInterpolate(Operator):
@@ -302,8 +355,8 @@ if __name__ == "__main__":
     # do a demo of what the software can handle
     from lazyflow.graph import Graph
     op = OpInterpMissingData(graph=Graph())
-    vol = vigra.readHDF5('/home/markus/Coding/hci/hci-data/missingslices.h5', 'volume/data')
+    vol = vigra.readHDF5('/media/KEYRINGSTIC/HCI/hci-data/missingslices.h5', 'volume/data')
     vol = vigra.VigraArray(vol, axistags=vigra.defaultAxistags('xyzc'))
     op.InputVolume.setValue(vol)
     res = op.Output[:].wait()
-    vigra.writeHDF5(res, '/home/markus/Coding/hci/hci-data/filledslices.h5', 'volume/data')
+    vigra.writeHDF5(res, '/media/KEYRINGSTIC/HCI/hci-data/filledslices.h5', 'volume/data')
