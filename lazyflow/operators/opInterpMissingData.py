@@ -50,17 +50,109 @@ class OpInterpMissingData(Operator):
         execute
         '''
         
-        '''
-        # FUTURE:
-        a = self.detector.Output.get(roi).wait()
-        while isMissing(a[rim]) or stopIterating:
-            roi = largerRoi
-            a = self.detector.Output.get(roi).wait()
+        assert self.interpolationMethod in self._requiredMargin.keys(), "Unknown interpolation method {}".format(self.interpolationMethod)
+        
+        def roi2slice(roi):
+            out = []
+            for start, stop in zip(roi.start, roi.stop):
+                out.append(slice(start, stop))
+            return tuple(out)
+
+        
+        oldStart = np.asarray([k for k in roi.start])
+        oldStop = np.asarray([k for k in roi.stop])
+
+        z_index = self.InputVolume.meta.axistags.index('z')
+        nz = self.InputVolume.meta.getTaggedShape()['z']
+        depth = self.InputSearchDepth.value
+        nRequestedSlices = roi.stop[z_index] - roi.start[z_index] + 1
+        nNeededSlices = min(self._requiredMargin[self.interpolationMethod],nRequestedSlices)
+        offsets = [0,0]
+        
+        # check start
+        nGoodSlices = 0
+        offset_pre = 0
+        offset_post = 0
+        roi.stop[z_index] = roi.start[z_index]+1
+        goMid = True
+        
+        while nGoodSlices < nNeededSlices and offset_pre < depth and roi.start[z_index]>0:
+            key = roi2slice(roi)
+            s = self.detector.Output[key].wait()
+            if not np.any(s>0): #clean slice
+                nGoodSlices += 1
+                if offset_post < nRequestedSlices-1 and goMid: # have more good slices in the requested region
+                    offset_post += 1
+                    roi.stop[z_index] += 1
+                    roi.start[z_index] += 1
+                else: #need to get more slices from outside the requested roi
+                    if goMid:
+                        goMid = False
+                        roi.stop[z_index] = oldStart[z_index]+1
+                        roi.start[z_index] = oldStart[z_index]
+                    offset_pre += 1
+                    roi.stop[z_index] -= 1
+                    roi.start[z_index] -= 1
+            else: # encountered a bad slice
+                # either way, we can't go any further mid
+                goMid = False
+                offset_pre += 1
+                roi.stop[z_index] -= 1
+                roi.start[z_index] -= 1
+                
+        offsets[0] = offset_pre
+        
+        # check end
+        nGoodSlices = 0
+        offset_pre = 0
+        offset_post = 0
+        roi.start[z_index] = roi.stop[z_index]-1
+        goMid = True
+        
+        while nGoodSlices < nNeededSlices and offset_post < depth and roi.stop[z_index]<nz:
+            key = roi2slice(roi)
+            s = self.detector.Output[key].wait()
+            if not np.any(s>0): #clean slice
+                nGoodSlices += 1
+                if offset_pre < nRequestedSlices-1 and goMid: # have more good slices in the requested region
+                    offset_pre += 1
+                    roi.stop[z_index] -= 1
+                    roi.start[z_index] -= 1
+                else: #need to get more slices from outside the requested roi
+                    if goMid:
+                        goMid = False
+                        roi.stop[z_index] = oldStop[z_index]
+                        roi.start[z_index] = oldStop[z_index]-1
+                    offset_post += 1
+                    roi.stop[z_index] += 1
+                    roi.start[z_index] += 1
+            else: # encountered a bad slice
+                # either way, we can't go any further mid
+                goMid = False
+                offset_post += 1
+                roi.stop[z_index] += 1
+                roi.start[z_index] += 1
+
+        offsets[1] = offset_post
+
+        # get extended interpolation
+        roi.start = oldStart
+        roi.stop = oldStop
+        roi.start[z_index] -= offsets[0]
+        roi.stop[z_index] += offsets[1]
         
         a = self.interpolator.Output.get(roi).wait()
-        result[:] = a[oldRoi]
-        '''
-        result[:] = self.interpolator.Output.get(roi).wait()
+        
+        # reduce to original roi
+        roi.stop = roi.stop - roi.start
+        roi.start *= 0
+        roi.start[z_index] += offsets[0]
+        roi.stop[z_index] -= offsets[1]
+        key = roi2slice(roi)
+        
+        result[:] = a[key]
+        
+        
         return result
     
     
@@ -151,15 +243,15 @@ class OpInterpolate(Operator):
         data = self.InputVolume.get(roi).wait()
         data = vigra.VigraArray(data, axistags=self.InputVolume.meta.axistags)
         missing = self.Missing.get(roi).wait()
-        missing = missing.squeeze()
+        missing = missing.view(np.ndarray).reshape((missing.shape[0],missing.shape[1], missing.shape[2]))
         #TODO what about close missing regions???
         
-        perm = data.squeeze().permutationToNumpyOrder()
-        
+        perm = data.permutationToNumpyOrder()
+        perm = [k for k in perm if k < 3]
         for i in range(1,missing.max()+1):
             self._interpolate(data.withAxes(*'zyx'),np.transpose((missing == i), perm))
         
-        result[:,:,:] = data
+        result[:] = data
         return result
         
     def _interpolate(self,volume, missing, method = None):
@@ -179,6 +271,7 @@ class OpInterpolate(Operator):
         
         # number and z-location of missing slices (z-axis is at zero)
         #FIXME showstopper, calling where for every patch on the whole image is not wise!
+        
         black_z_ind, black_y_ind, black_x_ind = np.where(missing)
         
         if len(black_z_ind) == 0: # no need for interpolation

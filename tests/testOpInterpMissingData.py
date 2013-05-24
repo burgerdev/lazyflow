@@ -483,8 +483,8 @@ class Old(unittest.TestCase):
 
         op.InputSearchDepth.setValue(2)
         res=op.Output(start = (0,0,46), stop = (10,10,49)).wait()
-        assert res[1,1,1]==51
-        assert res[1,1,-1]==51
+        assert_array_almost_equal(res[1,1,1],51)
+        assert_array_almost_equal(res[1,1,-1],51)
 
 
 
