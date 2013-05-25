@@ -81,7 +81,6 @@ def _singleMissingLayer(layer=30, nx=10,ny=10,nz=100,method='linear'):
 class TestDetection(unittest.TestCase):
     def setUp(self):
         self.op = OpDetectMissing(graph=Graph())
-        self.op.InputSearchDepth.setValue(0)
     
     def testSingleMissingLayer(self):
         (v,m,_) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
@@ -100,7 +99,29 @@ class TestDetection(unittest.TestCase):
         assert_array_equal(self.op.Output[:].wait().view(type=np.ndarray),\
                                 (m+m2).view(type=np.ndarray),\
                                 err_msg="input with two black layers")
-
+                            
+                            
+    def test4D(self):
+        vol = vigra.VigraArray( np.ones((50,50,10,3)), axistags=vigra.defaultAxistags('cxyz') )
+        self.op.InputVolume.setValue(vol)
+        self.op.Output[:].wait()
+                            
+    
+    def test5D(self):
+        vol = vigra.VigraArray( np.ones((50,50,10,3,7)), axistags=vigra.defaultAxistags('cxzty') )
+        self.op.InputVolume.setValue(vol)
+        self.op.Output[:].wait()
+            
+    '''    
+    def testOutputSlots(self):
+        (vol,_,_) = _singleMissingLayer()
+        self.op.InputVolume.setValue(vol)
+        self.assertTrue(self.op.IsBad[:].wait(), msg="Slot 'IsBad' was False for bad input.")
+        
+        vol = _volume()
+        self.op.InputVolume.setValue(vol)
+        self.assertFalse(self.op.IsBad[:].wait(), msg="Slot 'IsBad' was True for good input.")
+    '''
     
 class TestInterpolation(unittest.TestCase):
     '''
@@ -109,21 +130,22 @@ class TestInterpolation(unittest.TestCase):
     
     
     def setUp(self):
-        pass
+        g=Graph()
+        op = OpInterpolate(graph = g)
+        self.op = op
     
     def testLinearAlgorithm(self):
         (v,m,orig) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
         v[:,:,10:15] = 0
         m[:,:,10:15] = 1
         interpolationMethod = 'linear'
-        g=Graph()
-        op = OpInterpolate(graph = g)
-        op.InputVolume.setValue(v)
-        op.Missing.setValue(m)
-        op.interpolationMethod = interpolationMethod
-        op.InputVolume.setValue( v )
         
-        assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
+        self.op.InputVolume.setValue(v)
+        self.op.Missing.setValue(m)
+        self.op.interpolationMethod = interpolationMethod
+        self.op.InputVolume.setValue( v )
+        
+        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
                                 orig[:,:,10:15].view(np.ndarray), decimal=3,\
                                 err_msg="direct comparison to linear data")
         
@@ -134,14 +156,13 @@ class TestInterpolation(unittest.TestCase):
         v[:,:,10:15] = 0
         m[:,:,10:15] = 1
         interpolationMethod = 'cubic'
-        g=Graph()
-        op = OpInterpMissingData(graph = g)
-        op.InputSearchDepth.setValue(0)
-        op.interpolationMethod = interpolationMethod
-        op.InputVolume.setValue( v )
+        self.op.InputVolume.setValue(v)
+        self.op.Missing.setValue(m)
+        self.op.interpolationMethod = interpolationMethod
+        self.op.InputVolume.setValue( v )
         
         # natural comparison
-        assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
+        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
                                 orig[:,:,10:15].view(np.ndarray), decimal=3,\
                                 err_msg="direct comparison to cubic data")
         
@@ -154,18 +175,27 @@ class TestInterpolation(unittest.TestCase):
         spline = UnivariateSpline(x[:,:,[8, 9, 16, 17]], v[:,:,[8,9,16,17]], k=3, s=0)
         e = spline(np.arange(v.shape[2]))
         
-        assert_array_almost_equal(op.Output[:].wait()[:,:,10:15].squeeze().view(np.ndarray),\
+        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].squeeze().view(np.ndarray),\
                                 e[10:15], decimal=3, err_msg="scipy.interpolate.UnivariateSpline comparison")
                                 
-    def testSingletonDims(self):
-        v = vigra.VigraArray(np.zeros((20,20,20,1)), axistags=vigra.defaultAxistags('xyzt'))
-        (v[:,:,:,0],m,orig) = _singleMissingLayer(layer=15, nx=20,ny=20,nz=20,method='cubic')
-        op = OpInterpMissingData(graph = Graph())
-        op.InputSearchDepth.setValue(0)
-        op.InputVolume.setValue( v )
+    def test4D(self):
+        vol = vigra.VigraArray( np.ones((50,50,10,3)), axistags=vigra.defaultAxistags('cxyz') )
+        miss = vigra.VigraArray(vol)
+        miss[:,:,3,2] = 1
+        self.op.InputVolume.setValue(vol)
+        self.op.Missing.setValue(miss)
         
+        self.op.Output[:].wait()
+                            
+    
+    def test5D(self):
+        vol = vigra.VigraArray( np.ones((50,50,10,3,7)), axistags=vigra.defaultAxistags('cxzty') )
+        miss = vigra.VigraArray(vol)
+        miss[:,:,3,2,4] = 1
+        self.op.InputVolume.setValue(vol)
+        self.op.Missing.setValue(miss)
         
-        s = op.Output[:].wait()
+        self.op.Output[:].wait()
         
     
 
@@ -177,34 +207,30 @@ class TestInterpMissingData(unittest.TestCase):
     
     
     def setUp(self):
-        
-        pass
+        g=Graph()
+        op = OpInterpMissingData(graph = g)
+        op.InputSearchDepth.setValue(0)
+        self.op = op
     
     def testLinearBasics(self):
         
         interpolationMethod = 'linear'
-        g=Graph()
-        op = OpInterpMissingData(graph = g)
-        op.InputSearchDepth.setValue(0)
-        op.interpolationMethod = interpolationMethod
+        self.op.interpolationMethod = interpolationMethod
 
         for desc in _testDescriptions:
             (volume, _, expected) = _getTestVolume(desc, interpolationMethod)
-            op.InputVolume.setValue( volume )
-            assert_array_almost_equal(op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
+            self.op.InputVolume.setValue( volume )
+            assert_array_almost_equal(self.op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
         
     
     def testCubicBasics(self):
         interpolationMethod = 'cubic'
-        g=Graph()
-        op = OpInterpMissingData(graph = g)
-        op.InputSearchDepth.setValue(0)
-        op.interpolationMethod = interpolationMethod
+        self.op.interpolationMethod = interpolationMethod
 
         for desc in _testDescriptions:
             (volume, _, expected) = _getTestVolume(desc, interpolationMethod)
-            op.InputVolume.setValue( volume )
-            assert_array_almost_equal(op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
+            self.op.InputVolume.setValue( volume )
+            assert_array_almost_equal(self.op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
         
     
     def testBoundaryCases(self):
@@ -215,6 +241,7 @@ class TestInterpMissingData(unittest.TestCase):
     
     def testRoi(self):
         pass
+    
     
     
 

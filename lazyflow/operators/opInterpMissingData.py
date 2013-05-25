@@ -1,5 +1,7 @@
 import warnings
 from lazyflow.graph import Operator, InputSlot, OutputSlot
+from lazyflow.operators.adaptors import Op5ifyer
+from lazyflow.stype import Opaque
 import numpy as np
 import vigra
 
@@ -11,8 +13,10 @@ class OpInterpMissingData(Operator):
     name = "OpInterpMissingData"
 
     InputVolume = InputSlot()
-    InputSearchDepth = InputSlot()
+    InputSearchDepth = InputSlot(value=0)
+    PatchSize = InputSlot(value=64)
     Output = OutputSlot()
+    _StandardVolume = OutputSlot()
     
     interpolationMethod = 'cubic'
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
@@ -20,17 +24,15 @@ class OpInterpMissingData(Operator):
     def __init__(self, *args, **kwargs):
         super(OpInterpMissingData, self).__init__(*args, **kwargs)
         
+        
         self.detector = OpDetectMissing(parent=self)
         self.interpolator = OpInterpolate(parent=self)
         self.interpolator.interpolationMethod = self.interpolationMethod
         
         self.detector.InputVolume.connect(self.InputVolume)
-        self.detector.InputSearchDepth.connect(self.InputSearchDepth)
+        self.detector.PatchSize.connect(self.PatchSize)
         self.interpolator.InputVolume.connect(self.InputVolume)
-        self.interpolator.Missing.connect(self.detector.Output)
-        
-        self.InputSearchDepth.setValue(0)
-        
+        self.interpolator.Missing.connect(self.detector.Output) 
 
 
     def setupOutputs(self):
@@ -49,6 +51,9 @@ class OpInterpMissingData(Operator):
         '''
         execute
         '''
+        
+        if slot == self._StandardVolume:
+            return self._toStandard(roi,result)
         
         assert self.interpolationMethod in self._requiredMargin.keys(), "Unknown interpolation method {}".format(self.interpolationMethod)
         
@@ -163,6 +168,12 @@ class OpInterpMissingData(Operator):
         #warnings.warn("FIXME: propagateDirty not implemented!")
         self.Output.setDirty(roi)
         
+    
+    def _toStandard(self,roi,result):
+        # standard shape: zyx
+        shapes = self.InputVolume.meta.getTaggedShape()
+        
+        
 
 
 
@@ -231,27 +242,23 @@ class OpInterpolate(Operator):
         assert self.InputVolume.meta.getTaggedShape() == self.Missing.meta.getTaggedShape(), \
                 "InputVolume and Missing must have the same shape"
             
-        # Check for errors
-        taggedShape = self.InputVolume.meta.getTaggedShape()
-        if 't' in taggedShape:
-            assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
-        if 'c' in taggedShape:
-            assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
         
 
     def execute(self, slot, subindex, roi, result):
-        data = self.InputVolume.get(roi).wait()
-        data = vigra.VigraArray(data, axistags=self.InputVolume.meta.axistags)
-        missing = self.Missing.get(roi).wait()
-        missing = missing.view(np.ndarray).reshape((missing.shape[0],missing.shape[1], missing.shape[2]))
-        #TODO what about close missing regions???
         
-        perm = data.permutationToNumpyOrder()
-        perm = [k for k in perm if k < 3]
-        for i in range(1,missing.max()+1):
-            self._interpolate(data.withAxes(*'zyx'),np.transpose((missing == i), perm))
+        # prefill result
+        result[:] = self.InputVolume.get(roi).wait()
         
-        result[:] = data
+        resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
+        missingZYXCT = vigra.taggedView(self.Missing.get(roi).wait(),self.Missing.meta.axistags).withAxes(*'zyxct')
+        
+        for t in range(resultZYXCT.shape[4]):
+            for c in range(resultZYXCT.shape[3]):
+                for i in range(1,np.int(missingZYXCT[...,c,t].max())+1):
+                    self._interpolate(resultZYXCT[...,c,t], missingZYXCT[...,c,t]==i)
+        
+        
+        
         return result
         
     def _interpolate(self,volume, missing, method = None):
@@ -268,10 +275,15 @@ class OpInterpolate(Operator):
         method = self.interpolationMethod if method is None else method
         # sanity checks
         assert method in self._requiredMargin.keys(), "Unknown method '{}'".format(method)
+
+        assert volume.axistags.index('z') == 0 \
+            and volume.axistags.index('y') == 1 \
+            and volume.axistags.index('x') == 2 \
+            and len(volume.shape) == 3, \
+            "Data must be 3d with z as first axis."
         
         # number and z-location of missing slices (z-axis is at zero)
         #FIXME showstopper, calling where for every patch on the whole image is not wise!
-        
         black_z_ind, black_y_ind, black_x_ind = np.where(missing)
         
         if len(black_z_ind) == 0: # no need for interpolation
@@ -365,7 +377,7 @@ class SimplestPrediction():
     predicts 1 for a good patch, 0 for a bad patch
     '''
     
-    def fit(self, x, y):
+    def fit(self, x=None, y=None):
         pass
     
     def predict(self,X):
@@ -378,18 +390,18 @@ class SimplestPrediction():
 
 class OpDetectMissing(Operator):
     InputVolume = InputSlot()
-    InputSearchDepth = InputSlot()
+    PatchSize = InputSlot(value=64)
     Output = OutputSlot()
+    #IsBad = OutputSlot(stype=Opaque)
     
     _detector = SimplestPrediction()
-    _patchSize = 64
     _dumpedString = '/tmp/trained_histogram_svm.pkl'
     _outputDtype = np.uint16
     
     
     def __init__(self, *args, **kwargs):
         super(OpDetectMissing, self).__init__(*args, **kwargs)
-        
+    
         # choose prediction method
         ''' FUTURE
         if haveScikit:
@@ -408,19 +420,23 @@ class OpDetectMissing(Operator):
     def setupOutputs(self):
         self.Output.meta.assignFrom( self.InputVolume.meta )
         self.Output.meta.dtype = self._outputDtype
-
+        #self.IsBad.meta.assignFrom( self.InputVolume.meta )
+        #self.IsBad.setValue(False)
 
     def execute(self, slot, subindex, roi, result):
         
+        # prefill result
+        result[:] = 0
         # acquire data
         data = self.InputVolume.get(roi).wait()
+        dataZYXCT = vigra.taggedView(data,self.InputVolume.meta.axistags).withAxes(*'zyxct')
         
-        data = vigra.VigraArray(data, axistags=self.InputVolume.meta.axistags)
+        resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
         
-        # determine missing indices
-        missing = self._detectMissing(data)
-        
-        result[:] = missing
+        for t in range(dataZYXCT.shape[4]):
+            for c in range(dataZYXCT.shape[3]):
+                self._detectMissing(dataZYXCT[...,c,t],resultZYXCT[...,c,t])
+
         return result
     
     def isMissing(self,data):
@@ -436,8 +452,64 @@ class OpDetectMissing(Operator):
         
         return not self._detector.predict(newdata)[0]
     
+
+        
+    def _detectMissing(self, data, result):
+        '''
+        detects missing regions and labels each missing region with 
+        its own integer value
+        :param origData: 3d data 
+        :type origData: array-like
+        :returns: 3d integer block with non-zero integers for missing values
+        
+        
+        '''
+        
+        assert data.axistags.index('z') == 0 \
+            and data.axistags.index('y') == 1 \
+            and data.axistags.index('x') == 2 \
+            and len(data.shape) == 3, \
+            "Data must be 3d with z as first axis."
+        
+        m = self.PatchSize.value
+        if m is None or not m>0:
+            raise ValueError("PatchSize must be a positive integer")
+        
+        
+        maxZ,maxY,maxX = data.shape
+        
+        extX = maxX + m - maxX % m if maxX % m != 0 else maxX
+        extY = maxY + m - maxY % m if maxY % m != 0 else maxY
+        
+       
+        
+        maxLabel = 0
+        
+        # walk over slices
+        for z in range(maxZ):
+            # walk over patches
+            for y in range(extY//m):
+                startY = y*m
+                for x in range(extX//m):
+                    startX = x*m
+                    if self.isMissing(data[z,startY:startY+m,startX:startX+m]):
+                        if z == 0 or result[z-1,startY,startX] == 0: # start of a missing volume
+                            maxLabel += 1
+                            currentLabel = maxLabel
+                            #TODO maxInt overflow??
+                        else: # continuation of missing volume
+                            currentLabel = result[z-1,startY,startX]
+                        result[z,startY:np.min([startY+m,maxY]),startX:np.min([startX+m,maxX])] = currentLabel
+                    else:
+                        wasMissing = False
+
+    
     def _train(self):
-        m = self._patchSize
+        #m = self._patchSize
+        m = self.PatchSize.value
+        if m is None or not m>0:
+            raise ValueError("PatchSize must be a positive integer")
+        
         n = 10
         from sklearn import svm
         from sklearn.externals import joblib
@@ -462,66 +534,15 @@ class OpDetectMissing(Operator):
         self._detector = s
         
         joblib.dump(s, self._dumpedString)
-        
-    def _detectMissing(self, origData):
-        '''
-        detects missing regions and labels each missing region with 
-        its own integer value
-        :param origData: 3d data 
-        :type origData: array-like
-        :returns: 3d integer block with non-zero integers for missing values
-        
-        
-        '''
-        
-        m = self._patchSize
-        
-        # pre-allocate result
-        origResult = vigra.VigraArray(np.zeros(origData.shape, dtype=self._outputDtype), axistags=self.InputVolume.meta.axistags)
-        
-        origData = origData.withAxes(*'zyx')
-        result = origResult.withAxes(*'zyx')
-        
-        maxZ,maxY,maxX = origData.shape
-        
-        extX = maxX + m - maxX % m if maxX % m != 0 else maxX
-        extY = maxY + m - maxY % m if maxY % m != 0 else maxY
-        
-        #TODO this extension is not good for real SVM!!!
-        data = vigra.VigraArray(np.ones((maxZ,extY,extX)), axistags=vigra.defaultAxistags('zyx'))*0
-
-        data[:,0:maxY,0:maxX] = origData
-        
-        maxLabel = 0
-        
-        # walk over slices
-        for z in range(maxZ):
-            # walk over patches
-            for y in range(extY//m):
-                startY = y*m
-                for x in range(extX//m):
-                    startX = x*m
-                    if self.isMissing(data[z,startY:startY+m,startX:startX+m]):
-                        if z == 0 or result[z-1,startY,startX] == 0: # start of a missing volume
-                            maxLabel += 1
-                            currentLabel = maxLabel
-                            #TODO maxInt overflow??
-                        else: # continuation of missing volume
-                            currentLabel = result[z-1,startY,startX]
-                        result[z,startY:np.min([startY+m,maxY]),startX:np.min([startX+m,maxX])] = currentLabel
-                    else:
-                        wasMissing = False
-                        
-        return origResult
                         
     
 
 if __name__ == "__main__":
     # do a demo of what the software can handle
-    raise NotImplementedError("change file locations below.")
+    #raise NotImplementedError("change file locations below.")
     from lazyflow.graph import Graph
     op = OpInterpMissingData(graph=Graph())
-    #vol = vigra.readHDF5('/home/burger/hci/hci-data/validation_slices_20_40_3200_4000_1200_2000.h5', 'volume/data')
+    vol = vigra.readHDF5('/home/burger/hci/hci-data/validation_slices_20_40_3200_4000_1200_2000.h5', 'volume/data')
     vol = vol[0:400,...]
     vol = vigra.VigraArray(vol, axistags=vigra.defaultAxistags('xyzc'))
     m = 64
@@ -530,4 +551,4 @@ if __name__ == "__main__":
     op.InputVolume.setValue(vol)
     res = op.Output[:].wait()
     out = np.concatenate((vol,res))
-    #vigra.writeHDF5(out, '/home/burger/hci/hci-data/result.h5', 'volume/data')
+    vigra.writeHDF5(out, '/home/burger/hci/hci-data/result.h5', 'volume/data')
