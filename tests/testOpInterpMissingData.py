@@ -32,10 +32,14 @@ def _getTestVolume(description, method):
         (volume, missing, expected_output) = _singleMissingLayer(layer=30)
     elif description == 'last layer empty':
         (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=99)
+        # expect constant interpolation at border
+        expected_output[:,:,-1] = volume[:,:,-2]
     elif description == 'second to last layer empty':
         (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=98)
     elif description == 'first layer empty':
         (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=0)
+        # expect constant interpolation at border
+        expected_output[:,:,0] = volume[:,:,1]
     elif description == 'second layer empty':
         (volume, missing, expected_output) = _singleMissingLayer(nz=100, layer=1)
     elif description == 'first block empty':
@@ -45,6 +49,8 @@ def _getTestVolume(description, method):
         volume[:,:,0:10] = 0
         missing[:] = 0
         missing[:,:,0:10] = 1
+        # expect constant interpolation at border
+        expected_output[...,0:10] = volume[...,10]
     elif description == '':
         pass    
     elif description == '':
@@ -96,8 +102,8 @@ class TestDetection(unittest.TestCase):
         m2[np.where(m2==1)] = 2
         self.op.InputVolume.setValue(np.sqrt(v*v2))
         
-        assert_array_equal(self.op.Output[:].wait().view(type=np.ndarray),\
-                                (m+m2).view(type=np.ndarray),\
+        assert_array_equal(self.op.Output[:].wait().view(type=np.ndarray)>0,\
+                                (m+m2).view(type=np.ndarray)>0,\
                                 err_msg="input with two black layers")
                             
                             
@@ -197,6 +203,15 @@ class TestInterpolation(unittest.TestCase):
         
         self.op.Output[:].wait()
         
+    def testNothingToInterpolate(self):
+        vol = vigra.VigraArray( np.ones((50,50,10,3,7)), axistags=vigra.defaultAxistags('cxzty') )
+        miss = vigra.VigraArray(vol)*0
+        
+        self.op.InputVolume.setValue(vol)
+        self.op.Missing.setValue(miss)
+        
+        
+        assert_array_equal( self.op.Output[:].wait(), vol.view(np.ndarray), err_msg="interpolation where nothing had to be interpolated")
     
 
 
@@ -230,7 +245,7 @@ class TestInterpMissingData(unittest.TestCase):
         for desc in _testDescriptions:
             (volume, _, expected) = _getTestVolume(desc, interpolationMethod)
             self.op.InputVolume.setValue( volume )
-            assert_array_almost_equal(self.op.Output[:].wait()[:,:,30:50].view(np.ndarray), expected.view(np.ndarray)[:,:,30:50], decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
+            assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray), expected.view(np.ndarray), decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
         
     
     def testBoundaryCases(self):
@@ -240,19 +255,23 @@ class TestInterpMissingData(unittest.TestCase):
         pass
     
     def testRoi(self):
-        pass
+        nz = 30
+        interpolationMethod = 'cubic'
+        self.op.interpolationMethod = interpolationMethod
+        (vol, _, exp) = _singleMissingLayer(layer=nz,method=interpolationMethod)
+
+        self.op.InputVolume.setValue( vol )
+        
+        result = self.op.Output[:,:,nz].wait()
+        
+        assert_array_almost_equal(result, exp[:,:,nz].view(np.ndarray))
+        
     
     
     
 
-class Old(unittest.TestCase):
-    
-    def assertArraysAlmostEqual(self,a,b):
-        assert_array_almost_equal(a,b,decimal=5)
-            
-    def assertAll(self,b):
-        if not np.all(b):
-            self.fail("\n" + str(b) + "\n")
+class Traditional(unittest.TestCase):
+
             
     def setUp(self):
 
@@ -339,30 +358,30 @@ class Old(unittest.TestCase):
         op.InputSearchDepth.setValue(0)
         op.interpolationMethod = 'linear'
 
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,40],Ones*41)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,40],Ones*41)
         
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,70],Ones*71)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,70],Ones*71)
         
         op.InputVolume.setValue( self.d2 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,4],Ones*11)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,4],Ones*11)
         
         op.InputVolume.setValue( self.d3 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,99],Ones*99)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,99],Ones*99)
         
         op.InputVolume.setValue( self.d4 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,1],Ones*2)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,1],Ones*2)
         
         op.InputVolume.setValue( self.d5 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,0],Ones*2)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,0],Ones*2)
         
         op.InputVolume.setValue( self.d6 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,99],Ones*99)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,99],Ones*99)
         
         op.InputVolume.setValue( self.d7 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,50],Ones*0)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,50],Ones*0)
         
         op.InputVolume.setValue( self.d8 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[:,:,98],Ones*99)
+        assert_array_almost_equal(op.Output[:].wait()[:,:,98],Ones*99)
         
     def testBasicCubic(self):
 
@@ -375,7 +394,7 @@ class Old(unittest.TestCase):
         
         op.InputVolume.setValue( self.d1 )
         out = op.Output[:].wait()[:,:,40]
-        self.assertAll( (out > Ones*38) & (out < Ones*42))
+        self.assertTrue(np.all( (out > Ones*38) & (out < Ones*42)))
         
     def testMultipleMissingLinear(self):
         Ones=np.ones((10,10))
@@ -387,9 +406,9 @@ class Old(unittest.TestCase):
         
         op.InputVolume.setValue( self.d9 )
         out = op.Output[:].wait()[:,:,10]
-        self.assertArraysAlmostEqual(out, Ones*11)
+        assert_array_almost_equal(out, Ones*11)
         out = op.Output[:].wait()[:,:,90]
-        self.assertArraysAlmostEqual(out, Ones*182)
+        assert_array_almost_equal(out, Ones*182)
 
 
     def testAxesReversedLinear(self):
@@ -411,31 +430,31 @@ class Old(unittest.TestCase):
         op.InputSearchDepth.setValue(0)
         op.interpolationMethod = 'linear'
 
-        self.assertArraysAlmostEqual(op.Output[:].wait()[40,:,:],Ones*41)
+        assert_array_almost_equal(op.Output[:].wait()[40,:,:],Ones*41)
         
         
-        self.assertArraysAlmostEqual(op.Output[:].wait()[70,:,:],Ones*71)
+        assert_array_almost_equal(op.Output[:].wait()[70,:,:],Ones*71)
         
         op.InputVolume.setValue( d2 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[4,:,:],Ones*11)
+        assert_array_almost_equal(op.Output[:].wait()[4,:,:],Ones*11)
         
         op.InputVolume.setValue( d3 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[99,:,:],Ones*99)
+        assert_array_almost_equal(op.Output[:].wait()[99,:,:],Ones*99)
         
         op.InputVolume.setValue( d4 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[1,:,:],Ones*2)
+        assert_array_almost_equal(op.Output[:].wait()[1,:,:],Ones*2)
         
         op.InputVolume.setValue( d5 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[0,:,:],Ones*2)
+        assert_array_almost_equal(op.Output[:].wait()[0,:,:],Ones*2)
         
         op.InputVolume.setValue( d6 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[99,:,:],Ones*99)
+        assert_array_almost_equal(op.Output[:].wait()[99,:,:],Ones*99)
         
         op.InputVolume.setValue( d7 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[50,:,:],Ones*0)
+        assert_array_almost_equal(op.Output[:].wait()[50,:,:],Ones*0)
         
         op.InputVolume.setValue( d8 )
-        self.assertArraysAlmostEqual(op.Output[:].wait()[98,:,:],Ones*99)
+        assert_array_almost_equal(op.Output[:].wait()[98,:,:],Ones*99)
         
 
     def testRoi(self):
@@ -451,46 +470,46 @@ class Old(unittest.TestCase):
         op.interpolationMethod = 'linear'
 
         res=op.Output(start = (0,0,35), stop = (10,10,45)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],36)
-        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        assert_array_almost_equal(res[1,1,0],36)
+        assert_array_almost_equal(res[1,1,-1],45)
         
         res=op.Output(start = (0,0,30), stop = (10,10,45)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],31)
-        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        assert_array_almost_equal(res[1,1,0],31)
+        assert_array_almost_equal(res[1,1,-1],45)
         
         res=op.Output(start = (0,0,29), stop = (10,10,45)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],30)
-        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        assert_array_almost_equal(res[1,1,0],30)
+        assert_array_almost_equal(res[1,1,-1],45)
         
         res=op.Output(start = (0,0,0), stop = (10,10,45)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],1)
-        self.assertArraysAlmostEqual(res[1,1,-1],45)
+        assert_array_almost_equal(res[1,1,0],1)
+        assert_array_almost_equal(res[1,1,-1],45)
         
         res=op.Output(start = (0,0,0), stop = (10,10,50)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],1)
-        self.assertArraysAlmostEqual(res[1,1,-1],50)
+        assert_array_almost_equal(res[1,1,0],1)
+        assert_array_almost_equal(res[1,1,-1],50)
         
         res=op.Output(start = (0,0,35), stop = (10,10,51)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],36)
-        self.assertArraysAlmostEqual(res[1,1,-1],51)
+        assert_array_almost_equal(res[1,1,0],36)
+        assert_array_almost_equal(res[1,1,-1],51)
         
         res=op.Output(start = (0,0,35), stop = (10,10,70)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],36)
-        self.assertArraysAlmostEqual(res[1,1,-1],70)
+        assert_array_almost_equal(res[1,1,0],36)
+        assert_array_almost_equal(res[1,1,-1],70)
 
         op.InputVolume.setValue( d21 )
         res=op.Output(start = (0,0,0), stop = (10,10,20)).wait()
-        self.assertArraysAlmostEqual(res[1,1,3],11)
+        assert_array_almost_equal(res[1,1,3],11)
 
         op.InputVolume.setValue( d22 )
         res=op.Output(start = (0,0,0), stop = (10,10,6)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],11)
-        self.assertArraysAlmostEqual(res[1,1,-1],11)
+        assert_array_almost_equal(res[1,1,0],11)
+        assert_array_almost_equal(res[1,1,-1],11)
 
         op.InputVolume.setValue( d23 )
         res=op.Output(start = (0,0,1), stop = (10,10,2)).wait()
-        self.assertArraysAlmostEqual(res[1,1,0],11)
-        self.assertArraysAlmostEqual(res[1,1,-1],11)
+        assert_array_almost_equal(res[1,1,0],11)
+        assert_array_almost_equal(res[1,1,-1],11)
 
     def testdepthsearch(self):
         d1 = self.d1

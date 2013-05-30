@@ -187,37 +187,30 @@ class OpInterpMissingData(Operator):
 ################################
 ################################
 
+    
+try:
+    from scipy.ndimage import label as connectedComponents
+except ImportError:
+    warnings.warn("Could not import scipy.ndimage.label()")
+    def connectedComponents(X):
+        #FIXME!!
+        return (X,int(X.max()))
+    
+
 def _cubic_mat(n=1):
     n = float(n)
-    n1 = n+1
-    n2 = (n+1)*(n+1)
-    n3 = n2*(n+1)
-    non = (n+2)/(n+1)
-    non2 = non*non
-    non3 = non2*non
-    A = [[1, -1/n1, 1/n2, -1/n3],\
+    x = -1/(n+1)
+    y = (n+2)/(n+1)
+    
+    A = [[1, x, x**2, x**3],\
         [1, 0, 0, 0],\
         [1, 1, 1, 1],\
-        [1, non, non2, non3]]
+        [1, y, y**2, y**3]]
+    
+    #TODO we could implement the direct inverse here, but it's a bit lengthy
+    # compare to http://www.wolframalpha.com/input/?i=invert+matrix%28[1%2Cx%2Cx^2%2Cx^3]%2C[1%2C0%2C0%2C0]%2C[1%2C1%2C1%2C1]%2C[1%2Cy%2Cy^2%2Cy^3]%29
     
     return np.linalg.inv(A)
-
-def _cubic_coeffs_mat(f,g,h,i,n=1):
-    A = _cubic_mat(n)
-    D = np.zeros((f.shape[0], f.shape[1], 4))
-    D[...,0] = f
-    D[...,1] = g
-    D[...,2] = h
-    D[...,3] = i
-    F = np.tensordot(D,A,([2,],[1]))
-    
-    return (F[...,0], F[...,1], F[...,2], F[...,3])
-    
-
-def _spline(a0, a1, a2, a3, x, x2, x3):
-    return a0+a1*x+a2*x2+a3*x3
-
-_spline_mat = np.vectorize(_spline, otypes=[np.float])
 
 
 
@@ -252,10 +245,12 @@ class OpInterpolate(Operator):
         resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
         missingZYXCT = vigra.taggedView(self.Missing.get(roi).wait(),self.Missing.meta.axistags).withAxes(*'zyxct')
         
+        (missingLabeled,maxLabel) = connectedComponents(missingZYXCT)
+        
         for t in range(resultZYXCT.shape[4]):
             for c in range(resultZYXCT.shape[3]):
-                for i in range(1,np.int(missingZYXCT[...,c,t].max())+1):
-                    self._interpolate(resultZYXCT[...,c,t], missingZYXCT[...,c,t]==i)
+                for i in range(1,maxLabel+1):
+                    self._interpolate(resultZYXCT[...,c,t], missingLabeled[...,c,t]==i)
         
         
         
@@ -320,17 +315,15 @@ class OpInterpolate(Operator):
                 
         elif method == 'cubic': 
             # interpolation coefficients
-            F0 = volume[minZ,minY:maxY+1,minX:maxX+1]
-            F1 = volume[minZ+1,minY:maxY+1,minX:maxX+1]
-            F2 = volume[maxZ-1,minY:maxY+1,minX:maxX+1]
-            F3 = volume[maxZ,minY:maxY+1,minX:maxX+1]
-            (A0,A1,A2,A3) = _cubic_coeffs_mat(F0,F1,F2,F3,n)
+            
+            D = np.rollaxis(volume[[minZ,minZ+1,maxZ-1,maxZ],minY:maxY+1,minX:maxX+1],0,3)
+            F = np.tensordot(D,_cubic_mat(n),([2,],[1,]))
             
             xs = np.linspace(0,1,n+2)
             for i in range(n):
                 # interpolate every slice
                 x = xs[i+1]
-                volume[minZ+i+2,minY:maxY+1,minX:maxX+1] = _spline_mat(A0, A1, A2, A3, x, x**2, x**3)
+                volume[minZ+i+2,minY:maxY+1,minX:maxX+1] = F[...,0] + F[...,1]*x + F[...,2]*x**2 + F[...,3]*x**3 
                 
         else: #constant
             if minZ > 0:
@@ -363,7 +356,8 @@ try:
     haveScikit = True
 except ImportError:
     haveScikit = False
-    
+
+
 def _histkernel(X,Y):
     res = np.zeros((X.shape[0], Y.shape[0]))
     for i in range(X.shape[0]):
@@ -392,7 +386,7 @@ class OpDetectMissing(Operator):
     InputVolume = InputSlot()
     PatchSize = InputSlot(value=64)
     Output = OutputSlot()
-    #IsBad = OutputSlot(stype=Opaque)
+    IsBad = OutputSlot(stype=Opaque)
     
     _detector = SimplestPrediction()
     _dumpedString = '/tmp/trained_histogram_svm.pkl'
@@ -420,8 +414,8 @@ class OpDetectMissing(Operator):
     def setupOutputs(self):
         self.Output.meta.assignFrom( self.InputVolume.meta )
         self.Output.meta.dtype = self._outputDtype
-        #self.IsBad.meta.assignFrom( self.InputVolume.meta )
-        #self.IsBad.setValue(False)
+        self.IsBad.meta.shape = (1,)
+        self.IsBad.meta.dtype = np.bool
 
     def execute(self, slot, subindex, roi, result):
         
@@ -435,7 +429,7 @@ class OpDetectMissing(Operator):
         
         for t in range(dataZYXCT.shape[4]):
             for c in range(dataZYXCT.shape[3]):
-                self._detectMissing(dataZYXCT[...,c,t],resultZYXCT[...,c,t])
+                self._detectMissing(slot, dataZYXCT[...,c,t],resultZYXCT[...,c,t])
 
         return result
     
@@ -454,22 +448,19 @@ class OpDetectMissing(Operator):
     
 
         
-    def _detectMissing(self, data, result):
+    def _detectMissing(self, slot, data, result):
         '''
         detects missing regions and labels each missing region with 
         its own integer value
         :param origData: 3d data 
         :type origData: array-like
-        :returns: 3d integer block with non-zero integers for missing values
-        
-        
         '''
         
         assert data.axistags.index('z') == 0 \
             and data.axistags.index('y') == 1 \
             and data.axistags.index('x') == 2 \
             and len(data.shape) == 3, \
-            "Data must be 3d with z as first axis."
+            "Data must be 3d with axis 'zyx'."
         
         m = self.PatchSize.value
         if m is None or not m>0:
@@ -481,8 +472,6 @@ class OpDetectMissing(Operator):
         extX = maxX + m - maxX % m if maxX % m != 0 else maxX
         extY = maxY + m - maxY % m if maxY % m != 0 else maxY
         
-       
-        
         maxLabel = 0
         
         # walk over slices
@@ -493,13 +482,21 @@ class OpDetectMissing(Operator):
                 for x in range(extX//m):
                     startX = x*m
                     if self.isMissing(data[z,startY:startY+m,startX:startX+m]):
+                        '''
                         if z == 0 or result[z-1,startY,startX] == 0: # start of a missing volume
                             maxLabel += 1
                             currentLabel = maxLabel
                             #TODO maxInt overflow??
                         else: # continuation of missing volume
                             currentLabel = result[z-1,startY,startX]
-                        result[z,startY:np.min([startY+m,maxY]),startX:np.min([startX+m,maxX])] = currentLabel
+                        '''
+                        
+                        if slot == self.IsBad: # just return that this volume is indeed bad and stop iterating
+                            result = True
+                            return
+                        else: # label the patch as missing
+                            result[z,startY:np.min([startY+m,maxY]),startX:np.min([startX+m,maxX])] = 1
+                        
                     else:
                         wasMissing = False
 
@@ -539,7 +536,7 @@ class OpDetectMissing(Operator):
 
 if __name__ == "__main__":
     # do a demo of what the software can handle
-    #raise NotImplementedError("change file locations below.")
+    raise NotImplementedError("change file locations below.")
     from lazyflow.graph import Graph
     op = OpInterpMissingData(graph=Graph())
     vol = vigra.readHDF5('/home/burger/hci/hci-data/validation_slices_20_40_3200_4000_1200_2000.h5', 'volume/data')
