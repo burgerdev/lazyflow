@@ -2,6 +2,7 @@ import warnings
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.operators.adaptors import Op5ifyer
 from lazyflow.stype import Opaque
+from lazyflow.rtype import SubRegion
 import numpy as np
 import vigra
 
@@ -9,14 +10,34 @@ import vigra
 np.set_printoptions(linewidth=200)
 
 
+
+############################
+############################           
+############################
+###                      ###
+###  Top Level Operator  ###
+###                      ###
+############################
+############################
+############################
+
+
+
+try:
+    from ilastik.applets.patchCreator.opPatchCreator import patchify
+except ImportError:
+    warnings.warn("Could not import ilastik.applets.patchCreator.opPatchCreator (possibly ilastik is not installed)")
+    def patchify(img, patchShape, overlap, gridInit, gridShape):
+        #FIXME!!
+        raise NotImplementedError("No alternative for ilastik patchify function!")
+
 class OpInterpMissingData(Operator):
     name = "OpInterpMissingData"
 
     InputVolume = InputSlot()
-    InputSearchDepth = InputSlot(value=0)
+    InputSearchDepth = InputSlot(value=3)
     PatchSize = InputSlot(value=64)
     Output = OutputSlot()
-    _StandardVolume = OutputSlot()
     
     interpolationMethod = 'cubic'
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
@@ -41,7 +62,8 @@ class OpInterpMissingData(Operator):
 
         # Check for errors
         taggedShape = self.InputVolume.meta.getTaggedShape()
-
+        
+        # this assumption is important!
         if 't' in taggedShape:
             assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
         if 'c' in taggedShape:
@@ -51,9 +73,6 @@ class OpInterpMissingData(Operator):
         '''
         execute
         '''
-        
-        if slot == self._StandardVolume:
-            return self._toStandard(roi,result)
         
         assert self.interpolationMethod in self._requiredMargin.keys(), "Unknown interpolation method {}".format(self.interpolationMethod)
         
@@ -69,93 +88,24 @@ class OpInterpMissingData(Operator):
 
         z_index = self.InputVolume.meta.axistags.index('z')
         nz = self.InputVolume.meta.getTaggedShape()['z']
-        depth = self.InputSearchDepth.value
-        nRequestedSlices = roi.stop[z_index] - roi.start[z_index] + 1
-        nNeededSlices = min(self._requiredMargin[self.interpolationMethod],nRequestedSlices)
-        offsets = [0,0]
         
-        # check start
-        nGoodSlices = 0
-        offset_pre = 0
-        offset_post = 0
-        roi.stop[z_index] = roi.start[z_index]+1
-        goMid = True
-        
-        while nGoodSlices < nNeededSlices and offset_pre < depth and roi.start[z_index]>0:
-            key = roi2slice(roi)
-            s = self.detector.Output[key].wait()
-            
-            if not np.any(s>0): #clean slice
-                nGoodSlices += 1
-                if offset_post < nRequestedSlices-1 and goMid: # have more good slices in the requested region
-                    offset_post += 1
-                    roi.stop[z_index] += 1
-                    roi.start[z_index] += 1
-                else: #need to get more slices from outside the requested roi
-                    if goMid:
-                        goMid = False
-                        roi.stop[z_index] = oldStart[z_index]+1
-                        roi.start[z_index] = oldStart[z_index]
-                    offset_pre += 1
-                    roi.stop[z_index] -= 1
-                    roi.start[z_index] -= 1
-            else: # encountered a bad slice
-                # either way, we can't go any further mid
-                goMid = False
-                offset_pre += 1
-                roi.stop[z_index] -= 1
-                roi.start[z_index] -= 1
-                
-        offsets[0] = offset_pre
-        
-        # check end
-        nGoodSlices = 0
-        offset_pre = 0
-        offset_post = 0
-        roi.start[z_index] = oldStop[z_index]-1
-        roi.stop[z_index] = oldStop[z_index]
-        goMid = True
-        
-        while nGoodSlices < nNeededSlices and offset_post < depth and roi.stop[z_index]<nz:
-            key = roi2slice(roi)
-            s = self.detector.Output[key].wait()
-            if not np.any(s>0): #clean slice
-                nGoodSlices += 1
-                if offset_pre < nRequestedSlices-1 and goMid: # have more good slices in the requested region
-                    offset_pre += 1
-                    roi.stop[z_index] -= 1
-                    roi.start[z_index] -= 1
-                else: #need to get more slices from outside the requested roi
-                    if goMid:
-                        goMid = False
-                        roi.stop[z_index] = oldStop[z_index]
-                        roi.start[z_index] = oldStop[z_index]-1
-                    offset_post += 1
-                    roi.stop[z_index] += 1
-                    roi.start[z_index] += 1
-            else: # encountered a bad slice
-                # either way, we can't go any further mid
-                goMid = False
-                offset_post += 1
-                roi.stop[z_index] += 1
-                roi.start[z_index] += 1
-
-        offsets[1] = offset_post
-        
+        print("Pre",roi.start)
+        # check if more input is needed, and how many
+        z_offsets = self._extendRoi(roi)
+        print("Offsets", z_offsets)
+        print("Post",roi.start)
 
         # get extended interpolation
-        roi.start = oldStart
-        roi.stop = oldStop
-        roi.start[z_index] -= offsets[0]
-        roi.stop[z_index] += offsets[1]
+        roi.start[z_index] -= z_offsets[0]
+        roi.stop[z_index] += z_offsets[1]
         
         a = self.interpolator.Output.get(roi).wait()
         
         # reduce to original roi
         roi.stop = roi.stop - roi.start
         roi.start *= 0
-        roi.start[z_index] += offsets[0]
-        roi.stop[z_index] -= offsets[1]
+        roi.start[z_index] += z_offsets[0]
+        roi.stop[z_index] -= z_offsets[1]
         key = roi2slice(roi)
         
         result[:] = a[key]
@@ -172,9 +122,77 @@ class OpInterpMissingData(Operator):
         self.Output.setDirty(roi)
         
     
-    def _toStandard(self,roi,result):
-        # standard shape: zyx
-        shapes = self.InputVolume.meta.getTaggedShape()
+    def _extendRoi(self, roi):
+        
+        
+        origStart = np.copy(roi.start)
+        origStop = np.copy(roi.stop)
+        
+        
+        offset_top = 0
+        offset_bot = 0
+        
+        z_index = self.InputVolume.meta.axistags.index('z')
+        
+        depth = self.InputSearchDepth.value
+        nRequestedSlices = roi.stop[z_index] - roi.start[z_index]
+        nNeededSlices = self._requiredMargin[self.interpolationMethod]
+        
+        missing = vigra.taggedView(self.detector.Output.get(roi).wait(), axistags=self.InputVolume.meta.axistags).withAxes(*'zyx')
+        
+        nGoodSlicesTop = 0
+        # go inside the roi
+        for k in range(nRequestedSlices):
+            if np.all(missing[k,...]==0): #clean slice
+                nGoodSlicesTop += 1
+            else:
+                break
+        
+        # are we finished yet?
+        if nGoodSlicesTop >= nRequestedSlices:
+            return (0,0)
+        
+        # looks like we need more slices on top
+        while nGoodSlicesTop < nNeededSlices and offset_top < depth and roi.start[z_index] > 0:
+            roi.stop[z_index] = roi.start[z_index] 
+            roi.start[z_index] -= 1
+            offset_top += 1
+            topmissing = self.detector.Output.get(roi).wait()
+            if np.all(topmissing==0): # clean slice
+                nGoodSlicesTop += 1
+            else: # need to start again
+                nGoodSlicesTop = 0
+        
+        
+        nGoodSlicesBot = 0
+        # go inside the roi
+        for k in range(1,nRequestedSlices+1):
+            if np.all(missing[-k,...]==0): #clean slice
+                nGoodSlicesBot += 1
+            else:
+                break
+        
+        
+        roi.start = np.copy(origStart)
+        roi.stop = np.copy(origStop)
+        
+        
+        # looks like we need more slices on bottom
+        while nGoodSlicesBot < nNeededSlices and offset_bot < depth and roi.stop[z_index] < self.InputVolume.meta.getTaggedShape()['z']:
+            roi.start[z_index] = roi.stop[z_index] 
+            roi.stop[z_index] += 1
+            offset_bot += 1
+            botmissing = self.detector.Output.get(roi).wait()
+            if np.all(botmissing==0): # clean slice
+                nGoodSlicesBot += 1
+            else: # need to start again
+                nGoodSlicesBot = 0
+                
+        
+        roi.start = np.copy(origStart)
+        roi.stop = np.copy(origStop)
+        
+        return (offset_top,offset_bot)
         
         
 
@@ -236,7 +254,8 @@ class OpInterpolate(Operator):
         self.Output.meta.assignFrom( self.InputVolume.meta )
 
         assert self.InputVolume.meta.getTaggedShape() == self.Missing.meta.getTaggedShape(), \
-                "InputVolume and Missing must have the same shape"
+                "InputVolume and Missing must have the same shape ({} vs {})".format(\
+                self.InputVolume.meta.getTaggedShape(), self.Missing.meta.getTaggedShape())
             
         
 
@@ -299,6 +318,7 @@ class OpInterpolate(Operator):
         if not (minZ>-1 and maxZ < volume.shape[0]):
             # this method is not applicable, try another one
             warnings.warn("Margin not big enough for interpolation (need at least {} pixels for '{}')".format(self._requiredMargin[method], method))
+            print(missing[:,0,0])
             if self._fallbacks[method] is not None:
                 warnings.warn("Falling back to method '{}'".format(self._fallbacks[method]))
                 self._interpolate(volume, missing, self._fallbacks[method])
@@ -390,28 +410,18 @@ class SimplestPrediction():
 
 class OpDetectMissing(Operator):
     InputVolume = InputSlot()
-    PatchSize = InputSlot(value=64)
+    PatchSize = InputSlot(value=32)
+    HaloSize = InputSlot(value=32)
     Output = OutputSlot()
     IsBad = OutputSlot(stype=Opaque)
     
     _detector = SimplestPrediction()
-    _dumpedString = '/tmp/trained_histogram_svm.pkl'
     _outputDtype = np.uint8
     
     
     def __init__(self, *args, **kwargs):
         super(OpDetectMissing, self).__init__(*args, **kwargs)
-    
-        # choose prediction method
-        ''' FUTURE
-        if haveScikit:
-            try:
-                self._detector = joblib.load(self._dumpedString)
-            except IOError: #file not found
-                self._train()
-        '''
-            
-    
+
     def propagateDirty(self, slot, subindex, roi):
         # TODO
         #warnings.warn("FIXME: propagateDirty not implemented!")
@@ -490,9 +500,31 @@ class OpDetectMissing(Operator):
         extY = maxY + m - maxY % m if maxY % m != 0 else maxY
         
         
+        patchSize = self.PatchSize.value
+        haloSize = self.HaloSize.value
+        
+        if np.any(patchSize>np.asarray(data.shape[1:])):
+            warnings.warn("Ignoring small region (shape={})".format(data.shape))
+            maxZ=0
+            
+            
         # walk over slices
         for z in range(maxZ):
+            patches, positions = patchify(data[z,:,:].view(np.ndarray), (patchSize, patchSize), (haloSize,haloSize), (0,0), data.shape[1:])
             # walk over patches
+            
+            for patch, pos in zip(patches, positions):
+                if self.isMissing(patch):
+                    if slot == self.IsBad:
+                        return True
+                    else:
+                        ystart = pos[0]
+                        ystop = min(ystart+patchSize, data.shape[1])
+                        xstart = pos[1]
+                        xstop = min(xstart+patchSize, data.shape[2])
+                        result[z,ystart:ystop,xstart:xstop] = 1
+            
+            '''
             for y in range(extY//m):
                 startY = y*m
                 for x in range(extX//m):
@@ -505,6 +537,7 @@ class OpDetectMissing(Operator):
                         
                     else:
                         wasMissing = False
+            '''
          
         return False if slot == self.IsBad else result
 
