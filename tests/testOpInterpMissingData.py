@@ -118,7 +118,7 @@ class TestDetection(unittest.TestCase):
         self.op.InputVolume.setValue(vol)
         self.op.Output[:].wait()
             
-    '''    
+    
     def testOutputSlots(self):
         (vol,_,_) = _singleMissingLayer()
         self.op.InputVolume.setValue(vol)
@@ -127,7 +127,7 @@ class TestDetection(unittest.TestCase):
         vol = _volume()
         self.op.InputVolume.setValue(vol)
         self.assertFalse(self.op.IsBad[:].wait(), msg="Slot 'IsBad' was True for good input.")
-    '''
+    
     
 class TestInterpolation(unittest.TestCase):
     '''

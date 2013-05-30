@@ -396,7 +396,7 @@ class OpDetectMissing(Operator):
     
     _detector = SimplestPrediction()
     _dumpedString = '/tmp/trained_histogram_svm.pkl'
-    _outputDtype = np.uint16
+    _outputDtype = np.uint8
     
     
     def __init__(self, *args, **kwargs):
@@ -426,16 +426,24 @@ class OpDetectMissing(Operator):
     def execute(self, slot, subindex, roi, result):
         
         # prefill result
-        result[:] = 0
+        if slot == self.Output:
+            result[:] = 0
+            resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
+        elif slot == self.IsBad:
+            resultZYXCT = result
+            
         # acquire data
         data = self.InputVolume.get(roi).wait()
         dataZYXCT = vigra.taggedView(data,self.InputVolume.meta.axistags).withAxes(*'zyxct')
         
-        resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
+        
         
         for t in range(dataZYXCT.shape[4]):
             for c in range(dataZYXCT.shape[3]):
-                self._detectMissing(slot, dataZYXCT[...,c,t],resultZYXCT[...,c,t])
+                if slot == self.Output:
+                    resultZYXCT[...,c,t] = self._detectMissing(slot, dataZYXCT[...,c,t])
+                elif slot == self.IsBad and self._detectMissing(slot, dataZYXCT[...,c,t]):
+                    return True
 
         return result
     
@@ -454,7 +462,7 @@ class OpDetectMissing(Operator):
     
 
         
-    def _detectMissing(self, slot, data, result):
+    def _detectMissing(self, slot, data):
         '''
         detects missing regions and labels each missing region with 
         its own integer value
@@ -468,6 +476,9 @@ class OpDetectMissing(Operator):
             and len(data.shape) == 3, \
             "Data must be 3d with axis 'zyx'."
         
+        result = vigra.VigraArray(data)*0
+        
+        
         m = self.PatchSize.value
         if m is None or not m>0:
             raise ValueError("PatchSize must be a positive integer")
@@ -478,7 +489,6 @@ class OpDetectMissing(Operator):
         extX = maxX + m - maxX % m if maxX % m != 0 else maxX
         extY = maxY + m - maxY % m if maxY % m != 0 else maxY
         
-        maxLabel = 0
         
         # walk over slices
         for z in range(maxZ):
@@ -488,23 +498,15 @@ class OpDetectMissing(Operator):
                 for x in range(extX//m):
                     startX = x*m
                     if self.isMissing(data[z,startY:startY+m,startX:startX+m]):
-                        '''
-                        if z == 0 or result[z-1,startY,startX] == 0: # start of a missing volume
-                            maxLabel += 1
-                            currentLabel = maxLabel
-                            #TODO maxInt overflow??
-                        else: # continuation of missing volume
-                            currentLabel = result[z-1,startY,startX]
-                        '''
-                        
                         if slot == self.IsBad: # just return that this volume is indeed bad and stop iterating
-                            result = True
-                            return
+                            return True
                         else: # label the patch as missing
                             result[z,startY:np.min([startY+m,maxY]),startX:np.min([startX+m,maxX])] = 1
                         
                     else:
                         wasMissing = False
+         
+        return False if slot == self.IsBad else result
 
     
     def _train(self):
