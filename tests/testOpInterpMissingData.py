@@ -258,13 +258,14 @@ class TestInterpMissingData(unittest.TestCase):
         nz = 30
         interpolationMethod = 'cubic'
         self.op.interpolationMethod = interpolationMethod
-        (vol, _, exp) = _singleMissingLayer(layer=nz,method=interpolationMethod)
+        (vol, _, exp) = _singleMissingLayer(layer=nz,nx=1,ny=1,method=interpolationMethod)
 
         self.op.InputVolume.setValue( vol )
+        self.op.InputSearchDepth.setValue(5)
         
         result = self.op.Output[:,:,nz].wait()
         
-        assert_array_almost_equal(result, exp[:,:,nz].view(np.ndarray))
+        assert_array_almost_equal(result.squeeze(), exp[:,:,nz].view(np.ndarray).squeeze(), decimal=3)
         
     
     
@@ -383,18 +384,7 @@ class Traditional(unittest.TestCase):
         op.InputVolume.setValue( self.d8 )
         assert_array_almost_equal(op.Output[:].wait()[:,:,98],Ones*99)
         
-    def testBasicCubic(self):
 
-        Ones=np.ones((10,10))
-        g=Graph()
-        op = OpInterpMissingData(graph = g)
-        
-        op.InputSearchDepth.setValue(0)
-        op.interpolationMethod = 'linear'
-        
-        op.InputVolume.setValue( self.d1 )
-        out = op.Output[:].wait()[:,:,40]
-        self.assertTrue(np.all( (out > Ones*38) & (out < Ones*42)))
         
     def testMultipleMissingLinear(self):
         Ones=np.ones((10,10))
@@ -467,7 +457,6 @@ class Traditional(unittest.TestCase):
         op = OpInterpMissingData(graph = g)
         op.InputVolume.setValue( d1 )
         op.InputSearchDepth.setValue(100)
-        op.interpolationMethod = 'linear'
 
         res=op.Output(start = (0,0,35), stop = (10,10,45)).wait()
         assert_array_almost_equal(res[1,1,0],36)

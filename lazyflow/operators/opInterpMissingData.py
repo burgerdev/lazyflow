@@ -84,6 +84,7 @@ class OpInterpMissingData(Operator):
         while nGoodSlices < nNeededSlices and offset_pre < depth and roi.start[z_index]>0:
             key = roi2slice(roi)
             s = self.detector.Output[key].wait()
+            
             if not np.any(s>0): #clean slice
                 nGoodSlices += 1
                 if offset_post < nRequestedSlices-1 and goMid: # have more good slices in the requested region
@@ -111,7 +112,8 @@ class OpInterpMissingData(Operator):
         nGoodSlices = 0
         offset_pre = 0
         offset_post = 0
-        roi.start[z_index] = roi.stop[z_index]-1
+        roi.start[z_index] = oldStop[z_index]-1
+        roi.stop[z_index] = oldStop[z_index]
         goMid = True
         
         while nGoodSlices < nNeededSlices and offset_post < depth and roi.stop[z_index]<nz:
@@ -139,6 +141,7 @@ class OpInterpMissingData(Operator):
                 roi.start[z_index] += 1
 
         offsets[1] = offset_post
+        
 
         # get extended interpolation
         roi.start = oldStart
@@ -247,6 +250,7 @@ class OpInterpolate(Operator):
         
         (missingLabeled,maxLabel) = connectedComponents(missingZYXCT)
         
+        
         for t in range(resultZYXCT.shape[4]):
             for c in range(resultZYXCT.shape[3]):
                 for i in range(1,maxLabel+1):
@@ -281,12 +285,14 @@ class OpInterpolate(Operator):
         #FIXME showstopper, calling where for every patch on the whole image is not wise!
         black_z_ind, black_y_ind, black_x_ind = np.where(missing)
         
+        
         if len(black_z_ind) == 0: # no need for interpolation
             return 
         
         # indices with respect to the required margin around the missing values
         minZ = black_z_ind.min() - self._requiredMargin[method]
         maxZ = black_z_ind.max() + self._requiredMargin[method]
+        
         
         n = maxZ-minZ-2*self._requiredMargin[method]+1
         
