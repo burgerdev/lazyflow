@@ -108,11 +108,11 @@ def _singleMissingLayer(layer=30, nx=64,ny=64,nz=100,method='linear'):
 class TestDetection(unittest.TestCase):
     def setUp(self):
         self.op = OpDetectMissing(graph=Graph())
-        self.op.PatchSize.setValue(1)
+        self.op.PatchSize.setValue(64)
         self.op.HaloSize.setValue(0)
     
     def testSingleMissingLayer(self):
-        (v,m,_) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
+        (v,m,_) = _singleMissingLayer(layer=15, nx=64,ny=64,nz=50,method='linear')
         self.op.InputVolume.setValue(v)
         
         assert_array_equal(self.op.Output[:].wait().view(type=np.ndarray),\
@@ -120,8 +120,8 @@ class TestDetection(unittest.TestCase):
                                 err_msg="input with single black layer")
                             
     def testDoubleMissingLayer(self):
-        (v,m,_) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='linear')
-        (v2,m2,_) = _singleMissingLayer(layer=35, nx=1,ny=1,nz=50,method='linear')
+        (v,m,_) = _singleMissingLayer(layer=15, nx=64,ny=64,nz=50,method='linear')
+        (v2,m2,_) = _singleMissingLayer(layer=35, nx=64,ny=64,nz=50,method='linear')
         m2[np.where(m2==1)] = 2
         self.op.InputVolume.setValue(np.sqrt(v*v2))
         
@@ -143,7 +143,7 @@ class TestDetection(unittest.TestCase):
         self.op.InputVolume.setValue(vol)
         self.op.Output[:].wait()
             
-    
+    '''
     def testOutputSlots(self):
         (vol,_,_) = _singleMissingLayer()
         self.op.InputVolume.setValue(vol)
@@ -152,7 +152,7 @@ class TestDetection(unittest.TestCase):
         vol = _volume()
         self.op.InputVolume.setValue(vol)
         self.assertFalse(self.op.IsBad[:].wait(), msg="Slot 'IsBad' was True for good input.")
-    
+    '''
     
 class TestInterpolation(unittest.TestCase):
     '''
@@ -249,10 +249,10 @@ class TestInterpMissingData(unittest.TestCase):
     def setUp(self):
         g=Graph()
         op = OpInterpMissingData(graph = g)
-        op.InputSearchDepth.setValue(0)
         self.op = op
     
     def testLinearBasics(self):
+        self.op.InputSearchDepth.setValue(0)
         
         interpolationMethod = 'linear'
         self.op.interpolationMethod = interpolationMethod
@@ -264,6 +264,8 @@ class TestInterpMissingData(unittest.TestCase):
         
     
     def testCubicBasics(self):
+        self.op.InputSearchDepth.setValue(0)
+        
         interpolationMethod = 'cubic'
         self.op.interpolationMethod = interpolationMethod
 
@@ -273,6 +275,8 @@ class TestInterpMissingData(unittest.TestCase):
             assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray), expected.view(np.ndarray), decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
 
     def testSwappedAxesLinear(self):
+        self.op.InputSearchDepth.setValue(0)
+        
         interpolationMethod = 'linear'
         self.op.interpolationMethod = interpolationMethod
 
@@ -284,6 +288,8 @@ class TestInterpMissingData(unittest.TestCase):
             assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray), expected.view(np.ndarray), decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
     
     def testSwappedAxesCubic(self):
+        self.op.InputSearchDepth.setValue(0)
+        
         interpolationMethod = 'cubic'
         self.op.interpolationMethod = interpolationMethod
 

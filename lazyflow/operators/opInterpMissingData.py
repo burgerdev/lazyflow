@@ -37,6 +37,8 @@ class OpInterpMissingData(Operator):
     InputVolume = InputSlot()
     InputSearchDepth = InputSlot(value=3)
     PatchSize = InputSlot(value=64)
+    HaloSize = InputSlot(value=0)
+      
     Output = OutputSlot()
     
     interpolationMethod = 'cubic'
@@ -52,6 +54,7 @@ class OpInterpMissingData(Operator):
         
         self.detector.InputVolume.connect(self.InputVolume)
         self.detector.PatchSize.connect(self.PatchSize)
+        self.detector.HaloSize.connect(self.HaloSize)
         self.interpolator.InputVolume.connect(self.InputVolume)
         self.interpolator.Missing.connect(self.detector.Output) 
 
@@ -73,7 +76,7 @@ class OpInterpMissingData(Operator):
         '''
         execute
         '''
-        
+        print("InterpMissingData execute()")
         assert self.interpolationMethod in self._requiredMargin.keys(), "Unknown interpolation method {}".format(self.interpolationMethod)
         
         def roi2slice(roi):
@@ -89,12 +92,11 @@ class OpInterpMissingData(Operator):
         z_index = self.InputVolume.meta.axistags.index('z')
         nz = self.InputVolume.meta.getTaggedShape()['z']
         
-        print("Pre",roi.start)
         # check if more input is needed, and how many
         z_offsets = self._extendRoi(roi)
-        print("Offsets", z_offsets)
-        print("Post",roi.start)
-
+        
+        print("Detected:", self.detector.Output.get(roi).wait()[0,0,:])
+        
         # get extended interpolation
         roi.start[z_index] -= z_offsets[0]
         roi.stop[z_index] += z_offsets[1]
@@ -318,7 +320,6 @@ class OpInterpolate(Operator):
         if not (minZ>-1 and maxZ < volume.shape[0]):
             # this method is not applicable, try another one
             warnings.warn("Margin not big enough for interpolation (need at least {} pixels for '{}')".format(self._requiredMargin[method], method))
-            print(missing[:,0,0])
             if self._fallbacks[method] is not None:
                 warnings.warn("Falling back to method '{}'".format(self._fallbacks[method]))
                 self._interpolate(volume, missing, self._fallbacks[method])
@@ -378,13 +379,25 @@ class OpInterpolate(Operator):
 ############################
 
 try:
-    from sklearn.externals import joblib
-    haveScikit = True
+    from sklearn.svm import SVC
+    raise ImportError("SVM not available yet.")
 except ImportError:
-    haveScikit = False
+    class SVC(object):
+        
+        def __init__(self, kernel=None):
+            pass
+        
+        def fit(self, x=None, y=None):
+            pass
+        
+        def predict(self,X):
+            out = np.zeros(len(X))
+            for k, patch in enumerate(X):
+                out[k] = not np.all(patch[1:] == 0)
+            return out
 
 
-def _histkernel(X,Y):
+def _histogramIntersectionKernel(X,Y):
     res = np.zeros((X.shape[0], Y.shape[0]))
     for i in range(X.shape[0]):
         for j in range(Y.shape[0]):
@@ -392,46 +405,42 @@ def _histkernel(X,Y):
     
     return res
 
-class SimplestPrediction():
-    '''
-    predicts 1 for a good patch, 0 for a bad patch
-    '''
-    
-    def fit(self, x=None, y=None):
-        pass
-    
-    def predict(self,X):
-        out = np.zeros((X.shape[0],))
-        for k, patch in enumerate(X):
-            out[k] = not np.all(patch == 0)
-            
-        return out
-    
+
 
 class OpDetectMissing(Operator):
     InputVolume = InputSlot()
     PatchSize = InputSlot(value=32)
     HaloSize = InputSlot(value=32)
-    Output = OutputSlot()
-    IsBad = OutputSlot(stype=Opaque)
     
-    _detector = SimplestPrediction()
+    TrainingVolume = InputSlot(value = 1)
+    TrainingLabels = InputSlot(value = 1)
+    
+    Output = OutputSlot()
+    #IsBad = OutputSlot()
+    
+    _detectors = {}
     _outputDtype = np.uint8
     
     
     def __init__(self, *args, **kwargs):
         super(OpDetectMissing, self).__init__(*args, **kwargs)
-
+        
     def propagateDirty(self, slot, subindex, roi):
         # TODO
         #warnings.warn("FIXME: propagateDirty not implemented!")
+        
+        if slot == self.PatchSize or slot == self.HaloSize:
+            self._retrain()
+        
         self.Output.setDirty(roi)
     
     def setupOutputs(self):
         self.Output.meta.assignFrom( self.InputVolume.meta )
         self.Output.meta.dtype = self._outputDtype
-        self.IsBad.meta.shape = (1,)
-        self.IsBad.meta.dtype = np.bool
+        #self.IsBad.meta.shape = (1,)
+        #self.IsBad.meta.dtype = np.bool
+        
+        self._retrain()
 
     def execute(self, slot, subindex, roi, result):
         
@@ -439,8 +448,8 @@ class OpDetectMissing(Operator):
         if slot == self.Output:
             result[:] = 0
             resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
-        elif slot == self.IsBad:
-            resultZYXCT = result
+        #elif slot == self.IsBad:
+        #    resultZYXCT = result
             
         # acquire data
         data = self.InputVolume.get(roi).wait()
@@ -452,23 +461,27 @@ class OpDetectMissing(Operator):
             for c in range(dataZYXCT.shape[3]):
                 if slot == self.Output:
                     resultZYXCT[...,c,t] = self._detectMissing(slot, dataZYXCT[...,c,t])
-                elif slot == self.IsBad and self._detectMissing(slot, dataZYXCT[...,c,t]):
-                    return True
+                #elif slot == self.IsBad and self._detectMissing(slot, dataZYXCT[...,c,t]):
+                #    return True
 
         return result
     
     def isMissing(self,data):
         """
-        determines if data is missing values or not by use of the _detector attribute
+        determines if data is missing values or not 
         
-        :param data: a (self._patchSize x self._patchSize) slice 
+        :param data: a slice
         :type data: array-like
         :returns: bool -- True, if data seems to be missing
         """
         
-        newdata = data.view(np.ndarray).reshape((1,-1))
-        
-        return not self._detector.predict(newdata)[0]
+        if not data.size in self._detectors.keys():
+            warnings.warn("Encountered invalid patch size ({} not in {}), cannot determine if missing...".format(data.size, self._detectors.keys()))
+            return False
+        else:
+            hist = self._toHistogram(data)
+            print(hist)
+            return not self._detectors[data.size].predict([hist,])[0]
     
 
         
@@ -488,34 +501,27 @@ class OpDetectMissing(Operator):
         
         result = vigra.VigraArray(data)*0
         
-        
-        m = self.PatchSize.value
-        if m is None or not m>0:
-            raise ValueError("PatchSize must be a positive integer")
-        
-        
-        maxZ,maxY,maxX = data.shape
-        
-        extX = maxX + m - maxX % m if maxX % m != 0 else maxX
-        extY = maxY + m - maxY % m if maxY % m != 0 else maxY
-        
-        
         patchSize = self.PatchSize.value
         haloSize = self.HaloSize.value
+        
+        if patchSize is None or not patchSize>0:
+            raise ValueError("PatchSize must be a positive integer")
+        if haloSize is None or not haloSize>=0:
+            raise ValueError("HaloSize must be a non-negative integer")
         
         if np.any(patchSize>np.asarray(data.shape[1:])):
             warnings.warn("Ignoring small region (shape={})".format(data.shape))
             maxZ=0
-            
+        else:
+            maxZ = data.shape[0]
             
         # walk over slices
         for z in range(maxZ):
             patches, positions = patchify(data[z,:,:].view(np.ndarray), (patchSize, patchSize), (haloSize,haloSize), (0,0), data.shape[1:])
             # walk over patches
-            
             for patch, pos in zip(patches, positions):
                 if self.isMissing(patch):
-                    if slot == self.IsBad:
+                    if False: #slot == self.IsBad:
                         return True
                     else:
                         ystart = pos[0]
@@ -523,25 +529,17 @@ class OpDetectMissing(Operator):
                         xstart = pos[1]
                         xstop = min(xstart+patchSize, data.shape[2])
                         result[z,ystart:ystop,xstart:xstop] = 1
-            
-            '''
-            for y in range(extY//m):
-                startY = y*m
-                for x in range(extX//m):
-                    startX = x*m
-                    if self.isMissing(data[z,startY:startY+m,startX:startX+m]):
-                        if slot == self.IsBad: # just return that this volume is indeed bad and stop iterating
-                            return True
-                        else: # label the patch as missing
-                            result[z,startY:np.min([startY+m,maxY]),startX:np.min([startX+m,maxX])] = 1
-                        
-                    else:
-                        wasMissing = False
-            '''
          
-        return False if slot == self.IsBad else result
+        return result
+        #return False if slot == self.IsBad else result
 
-    
+    def _toHistogram(self,data):
+        r = (0,255) 
+        warnings.warn("FIXME: histogram range is hard-coded!")
+        (hist, _) = np.histogram(data, bins=data.size, range=r)
+        return hist
+        
+        
     def _train(self):
         #m = self._patchSize
         m = self.PatchSize.value
@@ -549,7 +547,7 @@ class OpDetectMissing(Operator):
             raise ValueError("PatchSize must be a positive integer")
         
         n = 10
-        from sklearn import svm
+        
         from sklearn.externals import joblib
         
         goodimages = np.zeros((4*n,m**2))
@@ -572,6 +570,13 @@ class OpDetectMissing(Operator):
         self._detector = s
         
         joblib.dump(s, self._dumpedString)
+        
+        
+    def _retrain(self):
+        patchSize = self.PatchSize.value + self.HaloSize.value
+        
+        #TODO dummy method!
+        self._detectors[patchSize**2] = SVC()
                         
     
 
