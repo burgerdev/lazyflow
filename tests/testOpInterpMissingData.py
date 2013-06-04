@@ -84,10 +84,10 @@ def _getTestVolume(description, method):
 def _volume(nx=64,ny=64,nz=100,method='linear'):
     b = vigra.VigraArray( np.ones((nx,ny,nz)), axistags=vigra.defaultAxistags('xyz') )
     if method == 'linear':
-        for i in range(b.shape[2]): b[:,:,i]*=(i+1)
+        for i in range(b.shape[2]): b[:,:,i]*=(i+1)+50
     elif method == 'cubic':
         s = nz/3
-        for z in range(b.shape[2]): b[:,:,z]= (z-s)**2*z*250.0/(nz*(nz-s)**2) + 1
+        for z in range(b.shape[2]): b[:,:,z]= (z-s)**2*z*150.0/(nz*(nz-s)**2) + 30
     elif method == 'constant':
         b[:] = 124
     else:

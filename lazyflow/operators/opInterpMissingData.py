@@ -1,4 +1,4 @@
-import warnings
+import logging
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.operators.adaptors import Op5ifyer
 from lazyflow.stype import Opaque
@@ -21,12 +21,15 @@ np.set_printoptions(linewidth=200)
 ############################
 ############################
 
+loggerName = __name__ 
+logger = logging.getLogger(loggerName)
+
 
 
 try:
     from ilastik.applets.patchCreator.opPatchCreator import patchify
 except ImportError:
-    warnings.warn("Could not import ilastik.applets.patchCreator.opPatchCreator (possibly ilastik is not installed)")
+    logger.warning("Could not import ilastik.applets.patchCreator.opPatchCreator (possibly ilastik is not installed)")
     def patchify(img, patchShape, overlap, gridInit, gridShape):
         #FIXME!!
         raise NotImplementedError("No alternative for ilastik patchify function!")
@@ -95,7 +98,6 @@ class OpInterpMissingData(Operator):
         # check if more input is needed, and how many
         z_offsets = self._extendRoi(roi)
         
-        print("Detected:", self.detector.Output.get(roi).wait()[0,0,:])
         
         # get extended interpolation
         roi.start[z_index] -= z_offsets[0]
@@ -120,7 +122,7 @@ class OpInterpMissingData(Operator):
         # TODO: This implementation of propagateDirty() isn't correct.
         #       That's okay for now, since this operator will never be used with input data that becomes dirty.
         #TODO if the input changes we're doing nothing?
-        #warnings.warn("FIXME: propagateDirty not implemented!")
+        #logger.warning("FIXME: propagateDirty not implemented!")
         self.Output.setDirty(roi)
         
     
@@ -214,7 +216,7 @@ class OpInterpMissingData(Operator):
 try:
     from scipy.ndimage import label as connectedComponents
 except ImportError:
-    warnings.warn("Could not import scipy.ndimage.label()")
+    logger.warning("Could not import scipy.ndimage.label()")
     def connectedComponents(X):
         #FIXME!!
         return (X,int(X.max()))
@@ -248,7 +250,7 @@ class OpInterpolate(Operator):
     
     def propagateDirty(self, slot, subindex, roi):
         # TODO
-        #warnings.warn("FIXME: propagateDirty not implemented!")
+        #logger.warning("FIXME: propagateDirty not implemented!")
         self.Output.setDirty(roi)
     
     def setupOutputs(self):
@@ -303,7 +305,6 @@ class OpInterpolate(Operator):
             "Data must be 3d with z as first axis."
         
         # number and z-location of missing slices (z-axis is at zero)
-        #FIXME showstopper, calling where for every patch on the whole image is not wise!
         black_z_ind, black_y_ind, black_x_ind = np.where(missing)
         
         
@@ -319,9 +320,9 @@ class OpInterpolate(Operator):
         
         if not (minZ>-1 and maxZ < volume.shape[0]):
             # this method is not applicable, try another one
-            warnings.warn("Margin not big enough for interpolation (need at least {} pixels for '{}')".format(self._requiredMargin[method], method))
+            logger.warning("Margin not big enough for interpolation (need at least {} pixels for '{}')".format(self._requiredMargin[method], method))
             if self._fallbacks[method] is not None:
-                warnings.warn("Falling back to method '{}'".format(self._fallbacks[method]))
+                logger.warning("Falling back to method '{}'".format(self._fallbacks[method]))
                 self._interpolate(volume, missing, self._fallbacks[method])
                 return
             else:
@@ -365,7 +366,7 @@ class OpInterpolate(Operator):
                     volume[minZ+i,minY:maxY+1,minX:maxX+1] = volume[maxZ+1,minY:maxY+1,minX:maxX+1]
             else:
                 # nothing to do for empty block
-                warnings.warn("Not enough data for interpolation, leaving slice as is ...")
+                logger.warning("Not enough data for interpolation, leaving slice as is ...")
             
             
 ############################
@@ -379,10 +380,11 @@ class OpInterpolate(Operator):
 ############################
 
 try:
-    from sklearn.svm import SVC
-    raise ImportError("SVM not available yet.")
+    from sklearn.svm import SVC as MySVM
+    #from sklearn.svm import OneClassSVM as MySVM
+    #raise ImportError("SVM not available yet.")
 except ImportError:
-    class SVC(object):
+    class MySVM(object):
         
         def __init__(self, kernel=None):
             pass
@@ -393,7 +395,7 @@ except ImportError:
         def predict(self,X):
             out = np.zeros(len(X))
             for k, patch in enumerate(X):
-                out[k] = not np.all(patch[1:] == 0)
+                out[k] = 0 if np.all(patch[1:] == 0) else 1
             return out
 
 
@@ -401,19 +403,29 @@ def _histogramIntersectionKernel(X,Y):
     res = np.zeros((X.shape[0], Y.shape[0]))
     for i in range(X.shape[0]):
         for j in range(Y.shape[0]):
-            res[i,j] = np.sum(np.where(X[i]<Y[j],X[i],Y[j]))
+            res[i,j] = np.sum(X[i]+Y[j]-np.abs(X[i]-Y[j]))
     
     return res
 
-
+def _defaultTrainingSet(defectSize=128):
+    vol = vigra.VigraArray(((np.random.rand(200,200,50)-.5)*125+125).astype(np.uint8), axistags=vigra.defaultAxistags('xyz'))
+    labels = vigra.VigraArray(np.zeros((200,200,50),dtype=np.uint8), axistags=vigra.defaultAxistags('xyz'))
+    
+    labels[70:70+defectSize,70:70+defectSize,1:3] = 2
+    labels[70:70+defectSize,70:70+defectSize,5:7] = 1
+    vol[70:70+defectSize,70:70+defectSize,5:7] = 0
+    return (vol, labels)
 
 class OpDetectMissing(Operator):
     InputVolume = InputSlot()
     PatchSize = InputSlot(value=32)
     HaloSize = InputSlot(value=32)
     
-    TrainingVolume = InputSlot(value = 1)
-    TrainingLabels = InputSlot(value = 1)
+    TrainingVolume = InputSlot(value = _defaultTrainingSet()[0])
+    
+    # labels: {0: unknown, 1: missing, 2: good}
+    TrainingLabels = InputSlot(value = _defaultTrainingSet()[1])
+    NTrainingSamples = InputSlot(value=250)
     
     Output = OutputSlot()
     #IsBad = OutputSlot()
@@ -427,7 +439,7 @@ class OpDetectMissing(Operator):
         
     def propagateDirty(self, slot, subindex, roi):
         # TODO
-        #warnings.warn("FIXME: propagateDirty not implemented!")
+        #logger.warning("FIXME: propagateDirty not implemented!")
         
         if slot == self.PatchSize or slot == self.HaloSize:
             self._retrain()
@@ -440,7 +452,16 @@ class OpDetectMissing(Operator):
         #self.IsBad.meta.shape = (1,)
         #self.IsBad.meta.dtype = np.bool
         
-        self._retrain()
+        tags = self.TrainingVolume.meta.getTaggedShape()
+        
+        if 't' in tags: assert tags['t'] == 1, "Time axis must be singleton"
+        if 'c' in tags: assert tags['c'] == 1, "Channel axis must be singleton"
+        
+        assert self.TrainingVolume.meta.getTaggedShape() == self.TrainingLabels.meta.getTaggedShape(), \
+            "Training labels and training volume must have the same shape."  
+        
+        
+        self._train()
 
     def execute(self, slot, subindex, roi, result):
         
@@ -476,12 +497,12 @@ class OpDetectMissing(Operator):
         """
         
         if not data.size in self._detectors.keys():
-            warnings.warn("Encountered invalid patch size ({} not in {}), cannot determine if missing...".format(data.size, self._detectors.keys()))
+            logger.warning("Encountered invalid patch size ({} not in {}), cannot determine if missing...".format(data.size, self._detectors.keys()))
             return False
         else:
             hist = self._toHistogram(data)
-            print(hist)
-            return not self._detectors[data.size].predict([hist,])[0]
+            ans = self._detectors[data.size].predict((hist,))[0]
+            return not np.bool(ans)
     
 
         
@@ -510,7 +531,7 @@ class OpDetectMissing(Operator):
             raise ValueError("HaloSize must be a non-negative integer")
         
         if np.any(patchSize>np.asarray(data.shape[1:])):
-            warnings.warn("Ignoring small region (shape={})".format(data.shape))
+            logger.warning("Ignoring small region (shape={})".format(data.shape))
             maxZ=0
         else:
             maxZ = data.shape[0]
@@ -521,77 +542,101 @@ class OpDetectMissing(Operator):
             # walk over patches
             for patch, pos in zip(patches, positions):
                 if self.isMissing(patch):
-                    if False: #slot == self.IsBad:
-                        return True
-                    else:
-                        ystart = pos[0]
-                        ystop = min(ystart+patchSize, data.shape[1])
-                        xstart = pos[1]
-                        xstop = min(xstart+patchSize, data.shape[2])
-                        result[z,ystart:ystop,xstart:xstop] = 1
+                    ystart = pos[0]
+                    ystop = min(ystart+patchSize, data.shape[1])
+                    xstart = pos[1]
+                    xstop = min(xstart+patchSize, data.shape[2])
+                    result[z,ystart:ystop,xstart:xstop] = 1
          
         return result
         #return False if slot == self.IsBad else result
 
     def _toHistogram(self,data):
-        r = (0,255) 
-        warnings.warn("FIXME: histogram range is hard-coded!")
-        (hist, _) = np.histogram(data, bins=data.size, range=r)
+        if self.InputVolume.meta.dtype == np.uint8:
+            r = (0,255) 
+        elif self.InputVolume.meta.dtype == np.uint16:
+            r = (0,65535) 
+        else:
+            #FIXME
+            r = (0,255)
+        (hist, _) = np.histogram(data, bins=100, range=r)
         return hist
         
         
-    def _train(self):
-        #m = self._patchSize
-        m = self.PatchSize.value
-        if m is None or not m>0:
-            raise ValueError("PatchSize must be a positive integer")
-        
-        n = 10
-        
-        from sklearn.externals import joblib
-        
-        goodimages = np.zeros((4*n,m**2))
-        goodclass = np.ones((4*n,))
-        badimages = np.zeros((n,m**2))
-        badclass = np.zeros((n,))
-        for i in range(n):
-            badimages[i,...] = (np.random.rand(m**2)).astype(np.uint8)
-            goodimages[4*i,...] = (np.random.rand(m**2)*5+50).astype(np.uint8)
-            goodimages[4*i+1,...] = (np.random.rand(m**2)*5+120).astype(np.uint8)
-            goodimages[4*i+2,...] = (np.random.rand(m**2)*5+200).astype(np.uint8)
-            goodimages[4*i+3,...] = (np.random.rand(m**2)*1+5).astype(np.uint8)
-    
-        s = svm.SVC(kernel=_histkernel)
-        X = np.concatenate((goodimages,badimages))
-        Y = np.concatenate((goodclass,badclass))
-
-        s.fit(X, Y)
-        
-        self._detector = s
-        
-        joblib.dump(s, self._dumpedString)
-        
-        
-    def _retrain(self):
+    def _train(self, force=False):
+        '''
+        retrains if patch size is currently untrained or force is True
+        '''
         patchSize = self.PatchSize.value + self.HaloSize.value
+        if force or not patchSize**2 in self._detectors.keys():
+            self._retrain(patchSize)
         
-        #TODO dummy method!
-        self._detectors[patchSize**2] = SVC()
-                        
     
+    def _retrain(self,  patchSize):
+        '''
+        trains with samples drawn from slots TrainingVolume and TrainingLabels
+        '''
+        
+        from scipy.signal import convolve2d as conv2d
+        
+        if not patchSize**2 in self._detectors.keys():
+            self._detectors[patchSize**2] = MySVM(kernel=_histogramIntersectionKernel)
+        
+        vol = vigra.taggedView(self.TrainingVolume[:].wait(),axistags=self.TrainingVolume.meta.axistags).withAxes(*'zyx')
+        labels = vigra.taggedView(self.TrainingLabels[:].wait(),axistags=self.TrainingLabels.meta.axistags).withAxes(*'zyx')
+        
+        def _extractHistograms(vol, labels,  n, borderCases='discard', nPatches=10):
+            
+            filt = np.ones((patchSize, patchSize))
+            out = []
+            cond = labels==n 
+            
+            ind_z, ind_y, ind_x = np.where(cond.view(np.ndarray))
+            
+            choice = np.random.choice(len(ind_x),size=nPatches, replace=False)
+            
+            for z,y,x in zip(ind_z[choice], ind_y[choice],ind_x[choice]):
+                ymin = y - patchSize//2
+                ymax = ymin + patchSize
+                xmin = x - patchSize//2
+                xmax = xmin + patchSize
+                
+                if xmin < 0 or ymin < 0 or xmax > vol.shape[2] or ymax > vol.shape[1]:
+                    continue
+
+                out.append(self._toHistogram(vol[z,ymin:ymax,xmin:xmax]))
+
+            return out
+        
+        inliers = _extractHistograms(vol, labels, 1, borderCases='keep', nPatches = self.NTrainingSamples.value)
+        outliers = _extractHistograms(vol, labels, 2, borderCases='discard', nPatches = self.NTrainingSamples.value)
+        
+        
+        assert len(inliers)>0 and len(outliers)>0, "Could not extract training data from volume."
+
+        #inliers = inliers[:min(len(inliers),10)]
+        #outliers = outliers[:min(len(inliers),10)]
+        
+        labelIn = [0]*len(inliers)
+        labelOut = [1]*len(outliers)
+        
+        x = inliers+outliers
+        y = labelIn+labelOut
+        self._detectors[patchSize**2].fit(x, y)
+        
+        #self._detectors[patchSize**2].fit(inliers)
+        
+        '''
+        print("Result for black slice: ", self.isMissing(vigra.VigraArray(np.zeros((1,patchSize, patchSize), dtype=np.uint8), axistags=vigra.defaultAxistags('zyx'))))
+        print("Result for gray slice: ", self.isMissing(vigra.VigraArray(np.ones((1,patchSize, patchSize), dtype=np.uint8)*125, axistags=vigra.defaultAxistags('zyx'))))
+        print("Result for white slice: ", self.isMissing(vigra.VigraArray(np.ones((1,patchSize, patchSize), dtype=np.uint8)*255, axistags=vigra.defaultAxistags('zyx'))))
+        
+        
+        print("Support Vectors:")
+        print(self._detectors[patchSize**2].support_vectors_)
+        '''
 
 if __name__ == "__main__":
     # do a demo of what the software can handle
     raise NotImplementedError("change file locations below.")
-    from lazyflow.graph import Graph
-    op = OpInterpMissingData(graph=Graph())
-    vol = vigra.readHDF5('/home/burger/hci/hci-data/validation_slices_20_40_3200_4000_1200_2000.h5', 'volume/data')
-    vol = vol[0:400,...]
-    vol = vigra.VigraArray(vol, axistags=vigra.defaultAxistags('xyzc'))
-    m = 64
-    vol[m*3:m*5,m*3:m*4,5,:] = 0
-    vol[m*2:m*4,m*7:m*8,10,:] = 0
-    op.InputVolume.setValue(vol)
-    res = op.Output[:].wait()
-    out = np.concatenate((vol,res))
-    vigra.writeHDF5(out, '/home/burger/hci/hci-data/result.h5', 'volume/data')
+    
