@@ -110,6 +110,7 @@ class TestDetection(unittest.TestCase):
         self.op = OpDetectMissing(graph=Graph())
         self.op.PatchSize.setValue(64)
         self.op.HaloSize.setValue(0)
+        self.op.DetectionMethod.setValue('svm')
     
     def testSingleMissingLayer(self):
         (v,m,_) = _singleMissingLayer(layer=15, nx=64,ny=64,nz=50,method='linear')
@@ -173,14 +174,13 @@ class TestInterpolation(unittest.TestCase):
         
         self.op.InputVolume.setValue(v)
         self.op.Missing.setValue(m)
-        self.op.interpolationMethod = interpolationMethod
+        self.op.InterpolationMethod.setValue(interpolationMethod)
         self.op.InputVolume.setValue( v )
         
-        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
-                                orig[:,:,10:15].view(np.ndarray), decimal=3,\
+        assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray),\
+                                orig.view(np.ndarray), decimal=3,\
                                 err_msg="direct comparison to linear data")
         
-        pass
     
     def testCubicAlgorithm(self):
         (v,m,orig) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='cubic')
@@ -189,12 +189,12 @@ class TestInterpolation(unittest.TestCase):
         interpolationMethod = 'cubic'
         self.op.InputVolume.setValue(v)
         self.op.Missing.setValue(m)
-        self.op.interpolationMethod = interpolationMethod
+        self.op.InterpolationMethod.setValue(interpolationMethod)
         self.op.InputVolume.setValue( v )
         
         # natural comparison
-        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].view(np.ndarray),\
-                                orig[:,:,10:15].view(np.ndarray), decimal=3,\
+        assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray),\
+                                orig.view(np.ndarray), decimal=3,\
                                 err_msg="direct comparison to cubic data")
         
         # scipy spline interpolation
@@ -208,6 +208,7 @@ class TestInterpolation(unittest.TestCase):
         
         assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].squeeze().view(np.ndarray),\
                                 e[10:15], decimal=3, err_msg="scipy.interpolate.UnivariateSpline comparison")
+                            
                                 
     def test4D(self):
         vol = vigra.VigraArray( np.ones((50,50,10,3)), axistags=vigra.defaultAxistags('cxyz') )
@@ -227,6 +228,7 @@ class TestInterpolation(unittest.TestCase):
         self.op.Missing.setValue(miss)
         
         self.op.Output[:].wait()
+        
         
     def testNothingToInterpolate(self):
         vol = vigra.VigraArray( np.ones((50,50,10,3,7)), axistags=vigra.defaultAxistags('cxzty') )
@@ -319,6 +321,8 @@ class TestInterpMissingData(unittest.TestCase):
         interpolationMethod = 'cubic'
         self.op.interpolationMethod = interpolationMethod
         (vol, _, exp) = _singleMissingLayer(layer=nz,method=interpolationMethod)
+        (vol2,_,_) = _singleMissingLayer(layer=nz+1,method=interpolationMethod)
+        vol = np.sqrt(vol*vol2)
 
         self.op.InputVolume.setValue( vol )
         self.op.InputSearchDepth.setValue(5)
@@ -329,6 +333,10 @@ class TestInterpMissingData(unittest.TestCase):
         pass
     
     def testBadImageSize(self):
+        #TODO implement
+        pass
+    
+    def testHaloSize(self):
         #TODO implement
         pass
 

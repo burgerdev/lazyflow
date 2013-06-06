@@ -9,8 +9,6 @@ import vigra
 
 np.set_printoptions(linewidth=200)
 
-
-
 ############################
 ############################           
 ############################
@@ -25,15 +23,6 @@ loggerName = __name__
 logger = logging.getLogger(loggerName)
 
 
-
-try:
-    from ilastik.applets.patchCreator.opPatchCreator import patchify
-except ImportError:
-    logger.warning("Could not import ilastik.applets.patchCreator.opPatchCreator (possibly ilastik is not installed)")
-    def patchify(img, patchShape, overlap, gridInit, gridShape):
-        #FIXME!!
-        raise NotImplementedError("No alternative for ilastik patchify function!")
-
 class OpInterpMissingData(Operator):
     name = "OpInterpMissingData"
 
@@ -41,10 +30,11 @@ class OpInterpMissingData(Operator):
     InputSearchDepth = InputSlot(value=3)
     PatchSize = InputSlot(value=64)
     HaloSize = InputSlot(value=0)
+    DetectionMethod = InputSlot(value='svm')
+    InterpolationMethod = InputSlot(value='cubic')
       
     Output = OutputSlot()
     
-    interpolationMethod = 'cubic'
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
     
     def __init__(self, *args, **kwargs):
@@ -53,13 +43,15 @@ class OpInterpMissingData(Operator):
         
         self.detector = OpDetectMissing(parent=self)
         self.interpolator = OpInterpolate(parent=self)
-        self.interpolator.interpolationMethod = self.interpolationMethod
         
         self.detector.InputVolume.connect(self.InputVolume)
         self.detector.PatchSize.connect(self.PatchSize)
         self.detector.HaloSize.connect(self.HaloSize)
+        self.detector.DetectionMethod.connect(self.DetectionMethod)
+        
         self.interpolator.InputVolume.connect(self.InputVolume)
         self.interpolator.Missing.connect(self.detector.Output) 
+        self.interpolator.InterpolationMethod.connect(self.InterpolationMethod) 
 
 
     def setupOutputs(self):
@@ -79,8 +71,10 @@ class OpInterpMissingData(Operator):
         '''
         execute
         '''
-        print("InterpMissingData execute()")
-        assert self.interpolationMethod in self._requiredMargin.keys(), "Unknown interpolation method {}".format(self.interpolationMethod)
+        
+        method = self.InterpolationMethod.value
+        
+        assert method in self._requiredMargin.keys(), "Unknown interpolation method {}".format(method)
         
         def roi2slice(roi):
             out = []
@@ -140,7 +134,7 @@ class OpInterpMissingData(Operator):
         
         depth = self.InputSearchDepth.value
         nRequestedSlices = roi.stop[z_index] - roi.start[z_index]
-        nNeededSlices = self._requiredMargin[self.interpolationMethod]
+        nNeededSlices = self._requiredMargin[self.InterpolationMethod.value]
         
         missing = vigra.taggedView(self.detector.Output.get(roi).wait(), axistags=self.InputVolume.meta.axistags).withAxes(*'zyx')
         
@@ -242,15 +236,15 @@ def _cubic_mat(n=1):
 class OpInterpolate(Operator):
     InputVolume = InputSlot()
     Missing = InputSlot()
+    InterpolationMethod = InputSlot(value='cubic')
+    
     Output = OutputSlot()
     
-    interpolationMethod = 'cubic'
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
     _fallbacks = {'cubic': 'linear', 'linear': 'constant', 'constant': None}
     
     def propagateDirty(self, slot, subindex, roi):
         # TODO
-        #logger.warning("FIXME: propagateDirty not implemented!")
         self.Output.setDirty(roi)
     
     def setupOutputs(self):
@@ -294,7 +288,7 @@ class OpInterpolate(Operator):
         :type method: str
         '''
         
-        method = self.interpolationMethod if method is None else method
+        method = self.InterpolationMethod.value if method is None else method
         # sanity checks
         assert method in self._requiredMargin.keys(), "Unknown method '{}'".format(method)
 
@@ -380,32 +374,63 @@ class OpInterpolate(Operator):
 ############################
 
 try:
-    from sklearn.svm import SVC as MySVM
-    #from sklearn.svm import OneClassSVM as MySVM
-    #raise ImportError("SVM not available yet.")
+    from sklearn.svm import SVC
+    haveSKlearn = True
 except ImportError:
+    haveSKlearn = False
+finally:
     class MySVM(object):
         
-        def __init__(self, kernel=None):
-            pass
+        ### setter and getter for property 'method' ###
+        _method = 'svm'
         
-        def fit(self, x=None, y=None):
-            pass
+        @property
+        def method(self):
+            return self._method
         
-        def predict(self,X):
-            out = np.zeros(len(X))
-            for k, patch in enumerate(X):
-                out[k] = 0 if np.all(patch[1:] == 0) else 1
-            return out
+        @method.setter
+        def method(self, value):
+            if not value in ['svm', 'classic']:
+                raise ValueError("Unknown method {}".format(value))
+            self._method = value
+        
+        ### ###
+        
+        def __init__(self, method='svm'):
+            if haveSKlearn:
+                self._svm = SVC(kernel=_histogramIntersectionKernel)
+            self.method = method
 
+
+        def fit(self, *args, **kwargs):
+            if self.method == 'classic':
+                pass
+            elif self.method == 'svm':
+                if not haveSKlearn:
+                    raise ImportError("missing module 'sklearn'")
+                self._svm.fit(*args, **kwargs)
+            
+        
+        def predict(self,*args, **kwargs):
+            if self.method == 'classic':
+                X = args[0]
+                out = np.zeros(len(X))
+                for k, patch in enumerate(X):
+                    out[k] = 0 if np.all(patch[1:] == 0) else 1
+                return out
+            elif self.method == 'svm':
+                if not haveSKlearn:
+                    raise ImportError("missing module 'sklearn'")
+                return self._svm.predict(*args, **kwargs)
+            
 
 def _histogramIntersectionKernel(X,Y):
     res = np.zeros((X.shape[0], Y.shape[0]))
     for i in range(X.shape[0]):
         for j in range(Y.shape[0]):
             res[i,j] = np.sum(X[i]+Y[j]-np.abs(X[i]-Y[j]))
-    
     return res
+
 
 def _defaultTrainingSet(defectSize=128):
     vol = vigra.VigraArray(((np.random.rand(200,200,50)-.5)*125+125).astype(np.uint8), axistags=vigra.defaultAxistags('xyz'))
@@ -416,10 +441,99 @@ def _defaultTrainingSet(defectSize=128):
     vol[70:70+defectSize,70:70+defectSize,5:7] = 0
     return (vol, labels)
 
+#######################################################################
+### <begin> stolen patchify from ilastik                            ###
+### TODO ask Kemal if it's ok to move this from ilastik to lazyflow ###
+#######################################################################
+def _add_channel(img):
+    # FIXME: use axistags
+    if img.ndim == 2:
+        img = img.reshape(img.shape + (1,))
+    if img.ndim != 3:
+        raise Exception('wrong number of dimensions: {}'.format(img.ndim))
+    return img
+
+
+def _patchify(img, patchShape, overlap, gridInit, gridShape):
+    """Break image into overlapping patches.
+
+    :param img: 2d or 3d (2d + channels) numpy array
+    :param patchShape = (x, y) = (height, width)
+    :param pWidth: size of patch edge in Y-direction
+    :param pHeight: size of patch edge in X-direction
+    :param overlap: overlap (x, y) in pixels
+
+    returns:
+        (patches, positions)
+
+    """
+    img = _add_channel(img)
+    height, width, channels = img.shape
+
+    pHeight, pWidth = patchShape
+    gStartVertical, gStartHorizontal = gridInit
+    gHeight, gWidth = gridShape
+
+    # check parameter settings
+    if width < pWidth:
+        raise Exception('patch width too large')
+    if height < pHeight:
+        raise Exception('patch height too large')
+    if pWidth < 1:
+        raise Exception('invalid patch width')
+    if pHeight < 1:
+        raise Exception('invalid patch height')
+    if gStartVertical < 0:
+        raise Exception('invalid grid vertical start')
+    if gStartVertical > (height - pHeight):
+        raise Exception('invalid grid vertical start')
+    if gStartHorizontal < 0:
+        raise Exception('invalid grid horizontal start')
+    if gStartHorizontal > (width - pWidth):
+        raise Exception('invalid grid horizontal start')
+    if gWidth < pWidth:
+        raise Exception('invalid grid width')
+    if (gStartHorizontal + gWidth) > width:
+        raise Exception('invalid grid width')
+    if gHeight < pHeight:
+        raise Exception('invalid grid height')
+    if (gStartVertical + gHeight) > height:
+        raise Exception('invalid grid height')
+
+    xstop = gStartVertical + gHeight - pHeight + 1
+    ystop = gStartHorizontal + gWidth - pWidth + 1
+
+    overlapVertical, overlapHorizontal = overlap
+
+    skipVertical = pHeight - overlapVertical
+    skipHorizontal = pWidth - overlapHorizontal
+
+    patches = []
+    posns = []
+
+    for x in range(gStartVertical, int(xstop), int(skipVertical)):
+        for y in range(gStartHorizontal, int(ystop), int(skipHorizontal)):
+            patch = img[x : x + pHeight, y : y + pWidth]
+            patches.append(patch.reshape(1, pHeight, pWidth, -1))
+            posns.append((x, y))
+    return np.vstack(patches), np.vstack(posns)
+
+#######################################################################
+### < end > stolen patchify from ilastik                            ###
+### TODO ask Kemal if it's ok to move this from ilastik to lazyflow ###
+#######################################################################
+
+
 class OpDetectMissing(Operator):
+    '''
+    Sub-Operator for detection of missing image content
+    '''
+    
     InputVolume = InputSlot()
     PatchSize = InputSlot(value=32)
     HaloSize = InputSlot(value=32)
+    #DetectionMethod = InputSlot(value='classic')
+    DetectionMethod = InputSlot(value='svm')
     
     TrainingVolume = InputSlot(value = _defaultTrainingSet()[0])
     
@@ -428,40 +542,35 @@ class OpDetectMissing(Operator):
     NTrainingSamples = InputSlot(value=250)
     
     Output = OutputSlot()
-    #IsBad = OutputSlot()
     
     _detectors = {}
-    _outputDtype = np.uint8
     
     
     def __init__(self, *args, **kwargs):
         super(OpDetectMissing, self).__init__(*args, **kwargs)
         
-    def propagateDirty(self, slot, subindex, roi):
-        # TODO
-        #logger.warning("FIXME: propagateDirty not implemented!")
         
-        if slot == self.PatchSize or slot == self.HaloSize:
+    def propagateDirty(self, slot, subindex, roi):
+        
+        if not (slot == self.InputVolume):
+            #FIXME this leads to long retraining when two or more slots are being set subsequently
             self._retrain()
         
         self.Output.setDirty(roi)
     
+    
     def setupOutputs(self):
         self.Output.meta.assignFrom( self.InputVolume.meta )
-        self.Output.meta.dtype = self._outputDtype
-        #self.IsBad.meta.shape = (1,)
-        #self.IsBad.meta.dtype = np.bool
+        self.Output.meta.dtype = np.uint8
         
         tags = self.TrainingVolume.meta.getTaggedShape()
-        
         if 't' in tags: assert tags['t'] == 1, "Time axis must be singleton"
         if 'c' in tags: assert tags['c'] == 1, "Channel axis must be singleton"
-        
         assert self.TrainingVolume.meta.getTaggedShape() == self.TrainingLabels.meta.getTaggedShape(), \
             "Training labels and training volume must have the same shape."  
         
-        
         self._train()
+
 
     def execute(self, slot, subindex, roi, result):
         
@@ -487,6 +596,7 @@ class OpDetectMissing(Operator):
 
         return result
     
+    
     def isMissing(self,data):
         """
         determines if data is missing values or not 
@@ -497,7 +607,7 @@ class OpDetectMissing(Operator):
         """
         
         if not data.size in self._detectors.keys():
-            logger.warning("Encountered invalid patch size ({} not in {}), cannot determine if missing...".format(data.size, self._detectors.keys()))
+            logger.error("Encountered invalid patch size ({} not in {}), cannot determine if missing...".format(data.size, self._detectors.keys()))
             return False
         else:
             hist = self._toHistogram(data)
@@ -505,7 +615,6 @@ class OpDetectMissing(Operator):
             return not np.bool(ans)
     
 
-        
     def _detectMissing(self, slot, data):
         '''
         detects missing regions and labels each missing region with 
@@ -538,7 +647,7 @@ class OpDetectMissing(Operator):
             
         # walk over slices
         for z in range(maxZ):
-            patches, positions = patchify(data[z,:,:].view(np.ndarray), (patchSize, patchSize), (haloSize,haloSize), (0,0), data.shape[1:])
+            patches, positions = _patchify(data[z,:,:].view(np.ndarray), (patchSize, patchSize), (haloSize,haloSize), (0,0), data.shape[1:])
             # walk over patches
             for patch, pos in zip(patches, positions):
                 if self.isMissing(patch):
@@ -549,7 +658,7 @@ class OpDetectMissing(Operator):
                     result[z,ystart:ystop,xstart:xstop] = 1
          
         return result
-        #return False if slot == self.IsBad else result
+
 
     def _toHistogram(self,data):
         if self.InputVolume.meta.dtype == np.uint8:
@@ -557,7 +666,7 @@ class OpDetectMissing(Operator):
         elif self.InputVolume.meta.dtype == np.uint16:
             r = (0,65535) 
         else:
-            #FIXME
+            #FIXME hardcoded range, use np.iinfo
             r = (0,255)
         (hist, _) = np.histogram(data, bins=100, range=r)
         return hist
@@ -577,10 +686,7 @@ class OpDetectMissing(Operator):
         trains with samples drawn from slots TrainingVolume and TrainingLabels
         '''
         
-        from scipy.signal import convolve2d as conv2d
-        
-        if not patchSize**2 in self._detectors.keys():
-            self._detectors[patchSize**2] = MySVM(kernel=_histogramIntersectionKernel)
+        self._detectors[patchSize**2] = MySVM(method=self.DetectionMethod.value)
         
         vol = vigra.taggedView(self.TrainingVolume[:].wait(),axistags=self.TrainingVolume.meta.axistags).withAxes(*'zyx')
         labels = vigra.taggedView(self.TrainingLabels[:].wait(),axistags=self.TrainingLabels.meta.axistags).withAxes(*'zyx')
@@ -612,10 +718,9 @@ class OpDetectMissing(Operator):
         outliers = _extractHistograms(vol, labels, 2, borderCases='discard', nPatches = self.NTrainingSamples.value)
         
         
-        assert len(inliers)>0 and len(outliers)>0, "Could not extract training data from volume."
-
-        #inliers = inliers[:min(len(inliers),10)]
-        #outliers = outliers[:min(len(inliers),10)]
+        if len(inliers)== 0 or len(outliers) == 0:
+            logger.error("Could not extract training data from volume.")
+            return
         
         labelIn = [0]*len(inliers)
         labelOut = [1]*len(outliers)
@@ -624,19 +729,7 @@ class OpDetectMissing(Operator):
         y = labelIn+labelOut
         self._detectors[patchSize**2].fit(x, y)
         
-        #self._detectors[patchSize**2].fit(inliers)
-        
-        '''
-        print("Result for black slice: ", self.isMissing(vigra.VigraArray(np.zeros((1,patchSize, patchSize), dtype=np.uint8), axistags=vigra.defaultAxistags('zyx'))))
-        print("Result for gray slice: ", self.isMissing(vigra.VigraArray(np.ones((1,patchSize, patchSize), dtype=np.uint8)*125, axistags=vigra.defaultAxistags('zyx'))))
-        print("Result for white slice: ", self.isMissing(vigra.VigraArray(np.ones((1,patchSize, patchSize), dtype=np.uint8)*255, axistags=vigra.defaultAxistags('zyx'))))
-        
-        
-        print("Support Vectors:")
-        print(self._detectors[patchSize**2].support_vectors_)
-        '''
 
 if __name__ == "__main__":
-    # do a demo of what the software can handle
-    raise NotImplementedError("change file locations below.")
+    pass
     
