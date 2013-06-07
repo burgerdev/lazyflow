@@ -268,7 +268,7 @@ class OpInterpolate(Operator):
                 
         for t in range(resultZYXCT.shape[4]):
             for c in range(resultZYXCT.shape[3]):
-                missingLabeled = labelVolumeWithBackground((missingZYXCT[...,c,t]>0).astype(np.uint8))
+                missingLabeled = labelVolumeWithBackground(missingZYXCT[...,c,t])
                 maxLabel = missingLabeled.max()
                 for i in range(1,maxLabel+1):
                     self._interpolate(resultZYXCT[...,c,t], missingLabeled==i)
@@ -442,8 +442,6 @@ def _defaultTrainingSet(defectSize=128):
     return (vol, labels)
 
 
-
-
 class OpDetectMissing(Operator):
     '''
     Sub-Operator for detection of missing image content
@@ -511,8 +509,6 @@ class OpDetectMissing(Operator):
             for c in range(dataZYXCT.shape[3]):
                 if slot == self.Output:
                     resultZYXCT[...,c,t] = self._detectMissing(slot, dataZYXCT[...,c,t])
-                #elif slot == self.IsBad and self._detectMissing(slot, dataZYXCT[...,c,t]):
-                #    return True
 
         return result
     
