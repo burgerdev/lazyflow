@@ -206,7 +206,8 @@ class OpInterpMissingData(Operator):
 ################################
 ################################
 
-    
+from vigra.analysis import labelVolumeWithBackground
+'''
 try:
     from scipy.ndimage import label as connectedComponents
 except ImportError:
@@ -214,7 +215,7 @@ except ImportError:
     def connectedComponents(X):
         #FIXME!!
         return (X,int(X.max()))
-    
+''' 
 
 def _cubic_mat(n=1):
     n = float(n)
@@ -264,14 +265,13 @@ class OpInterpolate(Operator):
         
         resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
         missingZYXCT = vigra.taggedView(self.Missing.get(roi).wait(),self.Missing.meta.axistags).withAxes(*'zyxct')
-        
-        (missingLabeled,maxLabel) = connectedComponents(missingZYXCT)
-        
-        
+                
         for t in range(resultZYXCT.shape[4]):
             for c in range(resultZYXCT.shape[3]):
+                missingLabeled = labelVolumeWithBackground((missingZYXCT[...,c,t]>0).astype(np.uint8))
+                maxLabel = missingLabeled.max()
                 for i in range(1,maxLabel+1):
-                    self._interpolate(resultZYXCT[...,c,t], missingLabeled[...,c,t]==i)
+                    self._interpolate(resultZYXCT[...,c,t], missingLabeled==i)
         
         
         
