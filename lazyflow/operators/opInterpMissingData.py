@@ -351,12 +351,10 @@ class OpInterpolate(Operator):
             if minZ > 0:
                 # fill right hand side with last good slice
                 for i in range(maxZ-minZ+1):
-                    #TODO what about non-missing values???
                     volume[minZ+i,minY:maxY+1,minX:maxX+1] = volume[minZ-1,minY:maxY+1,minX:maxX+1]
             elif maxZ < volume.shape[0]-1:
                 # fill left hand side with last good slice
                 for i in range(maxZ-minZ+1):
-                    #TODO what about non-missing values???
                     volume[minZ+i,minY:maxY+1,minX:maxX+1] = volume[maxZ+1,minY:maxY+1,minX:maxX+1]
             else:
                 # nothing to do for empty block
@@ -372,6 +370,8 @@ class OpInterpolate(Operator):
 ############################
 ############################
 ############################
+
+from lazyflow.operators.opPatchCreator import patchify
 
 try:
     from sklearn.svm import SVC
@@ -441,87 +441,7 @@ def _defaultTrainingSet(defectSize=128):
     vol[70:70+defectSize,70:70+defectSize,5:7] = 0
     return (vol, labels)
 
-#######################################################################
-### <begin> stolen patchify from ilastik                            ###
-### TODO ask Kemal if it's ok to move this from ilastik to lazyflow ###
-#######################################################################
-def _add_channel(img):
-    # FIXME: use axistags
-    if img.ndim == 2:
-        img = img.reshape(img.shape + (1,))
-    if img.ndim != 3:
-        raise Exception('wrong number of dimensions: {}'.format(img.ndim))
-    return img
 
-
-def _patchify(img, patchShape, overlap, gridInit, gridShape):
-    """Break image into overlapping patches.
-
-    :param img: 2d or 3d (2d + channels) numpy array
-    :param patchShape = (x, y) = (height, width)
-    :param pWidth: size of patch edge in Y-direction
-    :param pHeight: size of patch edge in X-direction
-    :param overlap: overlap (x, y) in pixels
-
-    returns:
-        (patches, positions)
-
-    """
-    img = _add_channel(img)
-    height, width, channels = img.shape
-
-    pHeight, pWidth = patchShape
-    gStartVertical, gStartHorizontal = gridInit
-    gHeight, gWidth = gridShape
-
-    # check parameter settings
-    if width < pWidth:
-        raise Exception('patch width too large')
-    if height < pHeight:
-        raise Exception('patch height too large')
-    if pWidth < 1:
-        raise Exception('invalid patch width')
-    if pHeight < 1:
-        raise Exception('invalid patch height')
-    if gStartVertical < 0:
-        raise Exception('invalid grid vertical start')
-    if gStartVertical > (height - pHeight):
-        raise Exception('invalid grid vertical start')
-    if gStartHorizontal < 0:
-        raise Exception('invalid grid horizontal start')
-    if gStartHorizontal > (width - pWidth):
-        raise Exception('invalid grid horizontal start')
-    if gWidth < pWidth:
-        raise Exception('invalid grid width')
-    if (gStartHorizontal + gWidth) > width:
-        raise Exception('invalid grid width')
-    if gHeight < pHeight:
-        raise Exception('invalid grid height')
-    if (gStartVertical + gHeight) > height:
-        raise Exception('invalid grid height')
-
-    xstop = gStartVertical + gHeight - pHeight + 1
-    ystop = gStartHorizontal + gWidth - pWidth + 1
-
-    overlapVertical, overlapHorizontal = overlap
-
-    skipVertical = pHeight - overlapVertical
-    skipHorizontal = pWidth - overlapHorizontal
-
-    patches = []
-    posns = []
-
-    for x in range(gStartVertical, int(xstop), int(skipVertical)):
-        for y in range(gStartHorizontal, int(ystop), int(skipHorizontal)):
-            patch = img[x : x + pHeight, y : y + pWidth]
-            patches.append(patch.reshape(1, pHeight, pWidth, -1))
-            posns.append((x, y))
-    return np.vstack(patches), np.vstack(posns)
-
-#######################################################################
-### < end > stolen patchify from ilastik                            ###
-### TODO ask Kemal if it's ok to move this from ilastik to lazyflow ###
-#######################################################################
 
 
 class OpDetectMissing(Operator):
@@ -532,8 +452,8 @@ class OpDetectMissing(Operator):
     InputVolume = InputSlot()
     PatchSize = InputSlot(value=32)
     HaloSize = InputSlot(value=32)
-    #DetectionMethod = InputSlot(value='classic')
-    DetectionMethod = InputSlot(value='svm')
+    DetectionMethod = InputSlot(value='classic')
+    #DetectionMethod = InputSlot(value='svm')
     
     TrainingVolume = InputSlot(value = _defaultTrainingSet()[0])
     
@@ -647,7 +567,7 @@ class OpDetectMissing(Operator):
             
         # walk over slices
         for z in range(maxZ):
-            patches, positions = _patchify(data[z,:,:].view(np.ndarray), (patchSize, patchSize), (haloSize,haloSize), (0,0), data.shape[1:])
+            patches, positions = patchify(data[z,:,:].view(np.ndarray), (patchSize, patchSize), (haloSize,haloSize), (0,0), data.shape[1:])
             # walk over patches
             for patch, pos in zip(patches, positions):
                 if self.isMissing(patch):
@@ -685,7 +605,7 @@ class OpDetectMissing(Operator):
         '''
         trains with samples drawn from slots TrainingVolume and TrainingLabels
         '''
-        
+        print(self.DetectionMethod.value)
         self._detectors[patchSize**2] = MySVM(method=self.DetectionMethod.value)
         
         vol = vigra.taggedView(self.TrainingVolume[:].wait(),axistags=self.TrainingVolume.meta.axistags).withAxes(*'zyx')
@@ -699,7 +619,7 @@ class OpDetectMissing(Operator):
             
             ind_z, ind_y, ind_x = np.where(cond.view(np.ndarray))
             
-            choice = np.random.choice(len(ind_x),size=nPatches, replace=False)
+            choice = np.random.permutation(len(ind_x))
             
             for z,y,x in zip(ind_z[choice], ind_y[choice],ind_x[choice]):
                 ymin = y - patchSize//2
