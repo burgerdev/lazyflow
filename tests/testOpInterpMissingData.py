@@ -8,7 +8,11 @@ from lazyflow.operators.opInterpMissingData import OpInterpMissingData, \
 import unittest
 from numpy.testing import assert_array_almost_equal, assert_array_equal
 
-from scipy.interpolate import UnivariateSpline
+try:
+    from scipy.interpolate import UnivariateSpline
+    haveScipy = True
+except ImportError:
+    haveScipy = False
 
 
 np.set_printoptions(precision=3, linewidth=80)
@@ -208,6 +212,9 @@ class TestInterpolation(unittest.TestCase):
                                 orig.view(np.ndarray), decimal=3,\
                                 err_msg="direct comparison to cubic data")
         
+        if not haveScipy:
+            return 
+            
         # scipy spline interpolation
         x = np.zeros(v.shape)
         x[:,:,:] = np.arange(v.shape[2])
