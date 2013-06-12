@@ -34,6 +34,7 @@ class OpInterpMissingData(Operator):
     InterpolationMethod = InputSlot(value='cubic')
       
     Output = OutputSlot()
+    Missing = OutputSlot()
     
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
     
@@ -52,6 +53,8 @@ class OpInterpMissingData(Operator):
         self.interpolator.InputVolume.connect(self.InputVolume)
         self.interpolator.Missing.connect(self.detector.Output) 
         self.interpolator.InterpolationMethod.connect(self.InterpolationMethod) 
+        
+        self.Missing.connect(self.detector.Output)
 
 
     def setupOutputs(self):
@@ -601,7 +604,6 @@ class OpDetectMissing(Operator):
         '''
         trains with samples drawn from slots TrainingVolume and TrainingLabels
         '''
-        print(self.DetectionMethod.value)
         self._detectors[patchSize**2] = MySVM(method=self.DetectionMethod.value)
         
         vol = vigra.taggedView(self.TrainingVolume[:].wait(),axistags=self.TrainingVolume.meta.axistags).withAxes(*'zyx')
