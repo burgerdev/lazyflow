@@ -422,9 +422,12 @@ def _histogramIntersectionKernel(X,Y):
     implements the histogram intersection kernel in a fancy way
     (standard: k(x,y) = sum(min(x_i,y_i)) )
     '''
+
     A = X.reshape( (X.shape[0],1,X.shape[1]) )
     B = Y.reshape( (1,) + Y.shape )
-    return np.sum(A+B-np.abs(A-B), axis=2)
+    
+    return np.sum(np.minimum(A,B), axis=2)
+
 
 def _defaultTrainingSet(defectSize=128):
     '''
@@ -626,44 +629,56 @@ class OpDetectMissing(Operator):
         #END subroutine
         
         bad = _extractHistograms(vol, labels == 1, nPatches = self.NTrainingSamples.value)
-        good = _extractHistograms(vol, labels == 2, nPatches = self.NTrainingSamples.value)
-        
+        good = _extractHistograms(vol, labels == 2, np.inf)
         
         if len(bad) < self.NTrainingSamples.value or len(good) < self.NTrainingSamples.value:
             logger.error("Could not extract enough training data from volume (bad: {}, good: {} < needed: {} !) - training aborted.".format(len(bad), len(good), self.NTrainingSamples.value))
             return
         
-        self._fit(good, bad, patchSize**2)
-        
-        #bad = _extractHistograms(vol, labels == 1, nPatches = np.inf)
-        #good = _extractHistograms(vol, labels == 2, nPatches = 1000)
-        #self._sophisticatedTraining(vol, labels)
+        logger.debug("Starting better training with {} good patches and {} bad patches...".format( len(good), len(bad)))
+        self._evenBetterTraining(good, bad)
         
         
     def _fit(self, good, bad, nPatchElements):
+        '''
+        train the underlying SVM
+        '''
         
         self._prepareDict(nPatchElements)
         
         labelGood = [0]*len(good)
         labelBad = [1]*len(bad)
         
-        x = good + bad
+        x = np.vstack( (good,bad) )
         y = labelGood+labelBad
         self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements].fit(x, y)
         
+        
     def _predict(self, X, nPatchElements):
+        '''
+        predict if the histograms in X correspond to missing regions
+        '''
         svm = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements]
         y = [svm.predict((x,))[0] for x in X]
         return np.asarray(y)
     
+    
     def _haveDetector(self, n):
+        '''
+        detector already trained?
+        '''
+        
         try:
             det = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][n]
             return True
         except KeyError:
             return False
         
+        
     def _prepareDict(self, nPatchElements):
+        '''
+        prepares the attribute _detectors for training
+        '''
         
         # base dictionary
         if not isinstance(self._detectors, dict):
@@ -684,34 +699,64 @@ class OpDetectMissing(Operator):
             self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = SVC(kernel=_histogramIntersectionKernel)                                                                                          
         else:                                                                                                                                                                                             
             self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = PseudoSVC() 
-        
-    def _sophisticatedTraining(self, data, labels):
+    
+            
+    def _evenBetterTraining(self, good, bad):
         '''
-        advanced training for patches of size n, see
+        we want to train on a 'hard' subset of the non-defective training data, see
         FELZENSZWALB ET AL.: OBJECT DETECTION WITH DISCRIMINATIVELY TRAINED PART-BASED MODELS (4.4), PAMI 32/9
         '''
+        
+        #TODO sanity checks
+        
         nSamples = self.NTrainingSamples.value
         n = (self.PatchSize.value + self.HaloSize.value)**2
-         
-        remainingSamples = good
-        hardSamples = []
-        prediction = self._predict(remainingSamples, n)
         
-        nIter = 0
-        while True: 
-            #from pdb import set_trace;set_trace()
-            nIter += 1
-            predictHard = self._predict(hardSamples, n)
-            print(len(np.where(predictHard>0)[0]))
-            #hardSamples = [g for i,g in enumerate(hardSamples) if predictHard[i]>0]
-            hardSamples += [g for i,g in enumerate(remainingSamples) if prediction[i]>0]
-            remainingSamples = [g for i,g in enumerate(remainingSamples) if prediction[i]==0]
-            print(len(hardSamples), len(bad))
-            self._fit(hardSamples, bad, n)
-            prediction = self._predict(remainingSamples, n)
-            logger.debug("Sophisticated Training (step {}): {} hard samples, {} remaining.".format(nIter, len(hardSamples), len(remainingSamples)))
+        maxGood = 2000
         
- 
+        good = np.asarray(good)
+        
+        ## suppose we have a list of training samples, good and bad
+        
+        both = set(range(len(good)))
+        # initial choice C_1
+        choice = np.random.permutation(len(good))[0:nSamples]
+        
+        
+        k = 0
+        while True:
+            k = k+1
+            
+            C_t = good[list(choice)]
+            
+            if len(C_t) > maxGood: #FIXME arbitrary
+                logger.debug("Cutting training set, too many negative samples.")
+                C_t = C_t[np.random.permutation(len(C_t))[0:maxGood]]
+            
+            logger.debug(" Felzenszwalb Training (step {}): {} hard samples.".format(k, len(C_t)))
+            self._fit(C_t, bad, n)
+            pred = self._predict(good, n)
+            hard = set([i for i in range(len(pred)) if pred[i]>0])
+            choice = set(choice)
+            
+            if  hard <= choice or k>4: #FIXME arbitrary magic number
+                #already have all hard examples in training set
+                break
+            
+            # add new hard examples to training set
+            #temp = len(choice)
+            #choice -= both.difference(hard)
+            #logger.debug("Removed {} easy samples.".format(temp-len(choice)))
+            temp = len(choice)
+            choice |= hard
+            logger.debug("Added {} hard samples.".format(len(choice)-temp))
+            
+        fp = float(len(hard))/len(good)
+        pred = self._predict(bad, n)
+        hard = set([i for i in range(len(pred)) if pred[i]==0])
+        fn = float(len(hard))/len(bad)
+        
+        logger.debug(" Finished Felzenszwalb Training. Remaining: %02.2f%% false positives, %02.2f%% false negatives." % (fp*100, fn*100))
 
 if __name__ == "__main__":
     pass
