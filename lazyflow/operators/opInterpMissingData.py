@@ -29,7 +29,7 @@ class OpInterpMissingData(Operator):
 
     InputVolume = InputSlot()
     InputSearchDepth = InputSlot(value=3)
-    PatchSize = InputSlot(value=64)
+    PatchSize = InputSlot(value=128)
     HaloSize = InputSlot(value=0)
     DetectionMethod = InputSlot(value='svm')
     InterpolationMethod = InputSlot(value='cubic')
@@ -83,7 +83,6 @@ class OpInterpMissingData(Operator):
         '''
         execute
         '''
-        
         method = self.InterpolationMethod.value
         
         assert method in self._requiredMargin.keys(), "Unknown interpolation method {}".format(method)
@@ -449,7 +448,7 @@ class OpDetectMissing(Operator):
     PatchSize = InputSlot(value=32)
     HaloSize = InputSlot(value=32)
     DetectionMethod = InputSlot(value='classic')
-    NHistogramBins = InputSlot(value=20)
+    NHistogramBins = InputSlot(value=30)
     
     TrainingVolume = InputSlot(value = _defaultTrainingSet()[0])
     
@@ -560,8 +559,8 @@ class OpDetectMissing(Operator):
             maxZ = data.shape[0]
             
         #from pdb import set_trace;set_trace()
-        # choose detector to take
-        currentDetector = self._detectors[self.DetectionMethod.value][(patchSize+haloSize)**2]
+        # pixels in patch
+        nPatchElements = (patchSize+haloSize)**2
             
         # walk over slices
         for z in range(maxZ):
@@ -569,7 +568,7 @@ class OpDetectMissing(Operator):
             # walk over patches
             for patch, pos in zip(patches, positions):
                 (hist, _) = np.histogram(patch, bins=self.NHistogramBins.value, range=self._inputRange)
-                if currentDetector.predict((hist,))[0] > 0: 
+                if self._predict((hist,), nPatchElements)[0] > 0: 
                     #patch is classified as missing
                     ystart = pos[0]
                     ystop = min(ystart+patchSize, data.shape[1])
@@ -588,15 +587,14 @@ class OpDetectMissing(Operator):
         patchSize = self.PatchSize.value + self.HaloSize.value
         
         # return early if unneccessary
-        if not force and patchSize**2 in self._detectors[self.DetectionMethod.value].keys():
+        if not force and self._haveDetector(patchSize**2):
             return
         
         logger.debug("Training for {} patch elements ...".format(patchSize**2))
         
-        if self.DetectionMethod.value == 'svm' and havesklearn:
-            self._detectors[self.DetectionMethod.value][patchSize**2] = SVC(kernel=_histogramIntersectionKernel)
-        else:
-            self._detectors[self.DetectionMethod.value][patchSize**2] = PseudoSVC(kernel=_histogramIntersectionKernel)
+        if self.DetectionMethod.value == 'classic':
+            # just insert the pseudo classifier
+            self._fit([], [], patchSize**2)
             return
         
         vol = vigra.taggedView(self.TrainingVolume[:].wait(),axistags=self.TrainingVolume.meta.axistags).withAxes(*'zyx')
@@ -635,13 +633,85 @@ class OpDetectMissing(Operator):
             logger.error("Could not extract enough training data from volume (bad: {}, good: {} < needed: {} !) - training aborted.".format(len(bad), len(good), self.NTrainingSamples.value))
             return
         
+        self._fit(good, bad, patchSize**2)
+        
+        #bad = _extractHistograms(vol, labels == 1, nPatches = np.inf)
+        #good = _extractHistograms(vol, labels == 2, nPatches = 1000)
+        #self._sophisticatedTraining(vol, labels)
+        
+        
+    def _fit(self, good, bad, nPatchElements):
+        
+        self._prepareDict(nPatchElements)
+        
         labelGood = [0]*len(good)
         labelBad = [1]*len(bad)
         
         x = good + bad
         y = labelGood+labelBad
-        self._detectors[self.DetectionMethod.value][patchSize**2].fit(x, y)
+        self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements].fit(x, y)
         
+    def _predict(self, X, nPatchElements):
+        svm = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements]
+        y = [svm.predict((x,))[0] for x in X]
+        return np.asarray(y)
+    
+    def _haveDetector(self, n):
+        try:
+            det = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][n]
+            return True
+        except KeyError:
+            return False
+        
+    def _prepareDict(self, nPatchElements):
+        
+        # base dictionary
+        if not isinstance(self._detectors, dict):
+            self._detectors = {self.DetectionMethod.value: {}}
+        
+        # dictionary of detection methods
+        if not self.DetectionMethod.value in self._detectors.keys() or \
+            not isinstance(self._detectors[self.DetectionMethod.value], dict):
+            self._detectors[self.DetectionMethod.value] = {}
+        
+        # dictionary of histogram sizes
+        if not self.NHistogramBins.value in self._detectors[self.DetectionMethod.value].keys() or \
+            not isinstance(self._detectors[self.DetectionMethod.value][self.NHistogramBins.value], dict):
+            self._detectors[self.DetectionMethod.value][self.NHistogramBins.value] = {}
+        
+        # detector
+        if self.DetectionMethod.value == 'svm' and havesklearn:                                                                                                                                           
+            self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = SVC(kernel=_histogramIntersectionKernel)                                                                                          
+        else:                                                                                                                                                                                             
+            self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = PseudoSVC() 
+        
+    def _sophisticatedTraining(self, data, labels):
+        '''
+        advanced training for patches of size n, see
+        FELZENSZWALB ET AL.: OBJECT DETECTION WITH DISCRIMINATIVELY TRAINED PART-BASED MODELS (4.4), PAMI 32/9
+        '''
+        nSamples = self.NTrainingSamples.value
+        n = (self.PatchSize.value + self.HaloSize.value)**2
+         
+        remainingSamples = good
+        hardSamples = []
+        prediction = self._predict(remainingSamples, n)
+        
+        nIter = 0
+        while True: 
+            #from pdb import set_trace;set_trace()
+            nIter += 1
+            predictHard = self._predict(hardSamples, n)
+            print(len(np.where(predictHard>0)[0]))
+            #hardSamples = [g for i,g in enumerate(hardSamples) if predictHard[i]>0]
+            hardSamples += [g for i,g in enumerate(remainingSamples) if prediction[i]>0]
+            remainingSamples = [g for i,g in enumerate(remainingSamples) if prediction[i]==0]
+            print(len(hardSamples), len(bad))
+            self._fit(hardSamples, bad, n)
+            prediction = self._predict(remainingSamples, n)
+            logger.debug("Sophisticated Training (step {}): {} hard samples, {} remaining.".format(nIter, len(hardSamples), len(remainingSamples)))
+        
+ 
 
 if __name__ == "__main__":
     pass
