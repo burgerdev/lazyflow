@@ -628,17 +628,83 @@ class OpDetectMissing(Operator):
             return out
         #END subroutine
         
-        bad = _extractHistograms(vol, labels == 1, nPatches = self.NTrainingSamples.value)
-        good = _extractHistograms(vol, labels == 2, np.inf)
+        bad = _extractHistograms(vol, labels == 1, nPatches = np.inf)
+        good = _extractHistograms(vol, labels == 2, nPatches = np.inf)
         
         if len(bad) < self.NTrainingSamples.value or len(good) < self.NTrainingSamples.value:
             logger.error("Could not extract enough training data from volume (bad: {}, good: {} < needed: {} !) - training aborted.".format(len(bad), len(good), self.NTrainingSamples.value))
             return
         
-        logger.debug("Starting better training with {} good patches and {} bad patches...".format( len(good), len(bad)))
+        logger.debug("Starting training with {} good patches and {} bad patches...".format( len(good), len(bad)))
         self._evenBetterTraining(good, bad)
         
+            
+    def _evenBetterTraining(self, good, bad):
+        '''
+        we want to train on a 'hard' subset of the non-defective training data, see
+        FELZENSZWALB ET AL.: OBJECT DETECTION WITH DISCRIMINATIVELY TRAINED PART-BASED MODELS (4.4), PAMI 32/9
+        '''
         
+        #TODO sanity checks
+        
+        nSamples = self.NTrainingSamples.value
+        n = (self.PatchSize.value + self.HaloSize.value)**2
+        
+        maxSamples = 2000
+        
+        good = np.asarray(good)
+        bad = np.asarray(bad)
+        
+        ## suppose we have a list of training samples, good and bad
+        
+        #both = set(range(len(good)))
+        
+        # initial choice C_1
+        choiceGood = set(np.random.permutation(len(good))[0:nSamples])
+        choiceBad = set(np.random.permutation(len(bad))[0:nSamples])
+        
+        
+        k = 0
+        while True:
+            k = k+1
+            
+            G_t = good[list(choiceGood)]
+            B_t = bad[list(choiceBad)]
+            
+            if len(G_t) > maxSamples: #FIXME arbitrary
+                logger.debug("Cutting training set, too many negative samples.")
+                G_t = G_t[np.random.permutation(len(G_t))[0:maxSamples]]
+                
+            if len(B_t) > maxSamples: #FIXME arbitrary
+                logger.debug("Cutting training set, too many positive samples.")
+                B_t = B_t[np.random.permutation(len(B_t))[0:maxSamples]]
+            
+            logger.debug(" Felzenszwalb Training (step {}): {} hard negative samples, {} hard positive samples.".format(k, len(G_t), len(B_t)))
+            self._fit(G_t, B_t, n)
+            predGood = self._predict(good, n)
+            predBad = self._predict(bad,n)
+            hardGood = set([i for i in range(len(predGood)) if predGood[i]>0])
+            hardBad = set([i for i in range(len(predBad)) if predBad[i]==0])
+            
+            if  hardGood <= choiceGood and hardBad <= choiceBad or k>4: #FIXME arbitrary magic number
+                #already have all hard examples in training set
+                break
+            
+            # add new hard examples to training set
+            #temp = len(choice)
+            #choice -= both.difference(hard)
+            #logger.debug("Removed {} easy samples.".format(temp-len(choice)))
+            tempGood = len(choiceGood); tempBad = len(choiceBad)
+            choiceGood |= hardGood
+            choiceBad |= hardBad
+            logger.debug("Added {} hard positive and {} hard negative samples.".format(len(choiceBad)-tempBad, len(choiceGood)-tempGood))
+            
+        fp = float(len(hardGood))/len(good)
+        fn = float(len(hardBad))/len(bad)
+        
+        logger.debug(" Finished Felzenszwalb Training. Remaining: %02.3f%% false positives, %02.3f%% false negatives." % (fp*100, fn*100))
+        
+         
     def _fit(self, good, bad, nPatchElements):
         '''
         train the underlying SVM
@@ -658,6 +724,8 @@ class OpDetectMissing(Operator):
         '''
         predict if the histograms in X correspond to missing regions
         '''
+        
+        #FIXME do this parallel (RequestPool)
         svm = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements]
         y = [svm.predict((x,))[0] for x in X]
         return np.asarray(y)
@@ -673,8 +741,8 @@ class OpDetectMissing(Operator):
             return True
         except KeyError:
             return False
-        
-        
+    
+    
     def _prepareDict(self, nPatchElements):
         '''
         prepares the attribute _detectors for training
@@ -699,65 +767,61 @@ class OpDetectMissing(Operator):
             self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = SVC(kernel=_histogramIntersectionKernel)                                                                                          
         else:                                                                                                                                                                                             
             self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = PseudoSVC() 
-    
-            
-    def _evenBetterTraining(self, good, bad):
-        '''
-        we want to train on a 'hard' subset of the non-defective training data, see
-        FELZENSZWALB ET AL.: OBJECT DETECTION WITH DISCRIMINATIVELY TRAINED PART-BASED MODELS (4.4), PAMI 32/9
-        '''
-        
-        #TODO sanity checks
-        
-        nSamples = self.NTrainingSamples.value
-        n = (self.PatchSize.value + self.HaloSize.value)**2
-        
-        maxGood = 2000
-        
-        good = np.asarray(good)
-        
-        ## suppose we have a list of training samples, good and bad
-        
-        both = set(range(len(good)))
-        # initial choice C_1
-        choice = np.random.permutation(len(good))[0:nSamples]
         
         
-        k = 0
-        while True:
-            k = k+1
-            
-            C_t = good[list(choice)]
-            
-            if len(C_t) > maxGood: #FIXME arbitrary
-                logger.debug("Cutting training set, too many negative samples.")
-                C_t = C_t[np.random.permutation(len(C_t))[0:maxGood]]
-            
-            logger.debug(" Felzenszwalb Training (step {}): {} hard samples.".format(k, len(C_t)))
-            self._fit(C_t, bad, n)
-            pred = self._predict(good, n)
-            hard = set([i for i in range(len(pred)) if pred[i]>0])
-            choice = set(choice)
-            
-            if  hard <= choice or k>4: #FIXME arbitrary magic number
-                #already have all hard examples in training set
-                break
-            
-            # add new hard examples to training set
-            #temp = len(choice)
-            #choice -= both.difference(hard)
-            #logger.debug("Removed {} easy samples.".format(temp-len(choice)))
-            temp = len(choice)
-            choice |= hard
-            logger.debug("Added {} hard samples.".format(len(choice)-temp))
-            
-        fp = float(len(hard))/len(good)
-        pred = self._predict(bad, n)
-        hard = set([i for i in range(len(pred)) if pred[i]==0])
-        fn = float(len(hard))/len(bad)
-        
-        logger.debug(" Finished Felzenszwalb Training. Remaining: %02.2f%% false positives, %02.2f%% false negatives." % (fp*100, fn*100))
 
 if __name__ == "__main__":
-    pass
+    
+    import tempfile
+    from sys import argv, exit
+    from lazyflow.graph import Graph
+    
+    if len(argv)<3:
+        print("Usage: {} <volume> <labels>".format(argv[0]))
+        exit(1)
+    
+    volumeFile = argv[1]
+    labelFile = argv[2]
+    
+    patchSize = 128
+    haloSize = 0
+    
+    logging.basicConfig()
+    logger.setLevel(logging.DEBUG)
+    
+    logger.debug("Training...")
+    
+    data = vigra.impex.readHDF5(volumeFile, '/volume/data').withAxes(*'zyx')
+    labels = vigra.impex.readHDF5(labelFile, '/volume/data').withAxes(*'zyx')
+    
+    op = OpDetectMissing(graph=Graph())
+
+    op.PatchSize.setValue(patchSize)
+    op.HaloSize.setValue(haloSize)
+    op.DetectionMethod.setValue('svm')
+    op.NHistogramBins.setValue(30)
+    
+    op.TrainingVolume.setValue(data)
+    
+    # labels: {0: unknown, 1: missing, 2: good}
+    op.TrainingLabels.setValue(labels)
+    op.NTrainingSamples.setValue(500)
+    
+    
+    op.InputVolume.setValue(data)
+    
+    det = op.Output[:].wait()
+    
+    try:
+        if len(argv)<4:
+            with tempfile.NamedTemporaryFile(suffix='.pkl', prefix='detector_', delete=False) as f:
+                logger.debug("Detector written to {}".format(f.name))
+                f.write(op.dumps())
+        else:
+            with open(argv[3],'w') as f:
+                logger.debug("Detector written to {}".format(f.name))
+                f.write(op.dumps())
+    except Exception as e:
+        print(e)
+        print(op.dumps())
     
