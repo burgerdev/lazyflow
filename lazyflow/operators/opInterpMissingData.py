@@ -36,9 +36,11 @@ class OpInterpMissingData(Operator):
     HaloSize = InputSlot(value=30)
     DetectionMethod = InputSlot(value='svm')
     InterpolationMethod = InputSlot(value='cubic')
+    OverloadDetector = InputSlot(value='')
       
     Output = OutputSlot()
     Missing = OutputSlot()
+    Detector = OutputSlot(stype=Opaque)
     
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
     
@@ -61,9 +63,6 @@ class OpInterpMissingData(Operator):
         self.Missing.connect(self.detector.Output)
 
     def dumps(self):
-        #FIXME this is not good
-        #       a) accessing private attribute
-        #       b) could be bad if sklearn becomes available after saving
         return self.detector.dumps()
     
     def loads(self, s):
@@ -81,11 +80,18 @@ class OpInterpMissingData(Operator):
             assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
         if 'c' in taggedShape:
             assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
+            
+        self.Detector.meta.shape = (1,)
 
     def execute(self, slot, subindex, roi, result):
         '''
         execute
         '''
+        
+        if slot == self.Detector:
+            result = self.dumps()
+            return result
+        
         method = self.InterpolationMethod.value
         
         assert method in self._requiredMargin.keys(), "Unknown interpolation method {}".format(method)
@@ -128,10 +134,14 @@ class OpInterpMissingData(Operator):
     
     def propagateDirty(self, slot, subindex, roi):
         # TODO: This implementation of propagateDirty() isn't correct.
-        #       That's okay for now, since this operator will never be used with input data that becomes dirty.
-        #TODO if the input changes we're doing nothing?
-        #logger.warning("FIXME: propagateDirty not implemented!")
-        self.Output.setDirty(roi)
+        if slot == self.InputVolume:
+            self.Output.setDirty(roi)
+        
+        if slot == self.OverloadDetector:
+            s = self.OverloadDetector.value
+            self.loads(s)
+        
+        
         
     
     def _extendRoi(self, roi):
@@ -207,7 +217,56 @@ class OpInterpMissingData(Operator):
         return (offset_top,offset_bot)
         
         
+'''FIXME sort that into OpInterpMissingData
+#BEGIN subroutine
+        def _extractHistograms(vol, cond, nPatches=10):
+            
+            out = []
+            
+            ind_z, ind_y, ind_x = np.where(cond.view(np.ndarray))
+            
+            choice = np.random.permutation(len(ind_x))
+            
+            for i, z,y,x in zip(range(len(choice)), ind_z[choice], ind_y[choice],ind_x[choice]):
+                
+                if len(out)>=nPatches:
+                    logger.debug(" Finished extracting {} histograms.".format(len(out)))
+                    break
+                    
+                if i%50000==0:
+                    logger.debug(" Extracting histograms, {}/{} done ...".format(i, len(choice)))
+                    
+                ymin = y - patchSize//2
+                ymax = ymin + patchSize
+                xmin = x - patchSize//2
+                xmax = xmin + patchSize
+                
+                if not (xmin < 0 or ymin < 0 or xmax > vol.shape[2] or ymax > vol.shape[1]):
+                    # valid patch, add it to the output
+                    (hist, _) = np.histogram(vol[z,ymin:ymax,xmin:xmax], bins=self.NHistogramBins.value, range=self._inputRange, \
+                                             density = True)
+                    out.append(hist)
+                
+            return out
+        #END subroutine
+        
+        histograms = [0,0]
+        logger.debug(" Starting histogram extraction.")
+        def partFun(i):
+            if i==0:
+                histograms[i] = _extractHistograms(vol, labels == 2, nPatches = self.NTrainingSamples.value)
+            else:
+                histograms[i] = _extractHistograms(vol, labels == 1, nPatches = self.NTrainingSamples.value)
+        
+        pool = RequestPool()
 
+        for i in range(len(histograms)):
+            req = Request(partial(partFun, i))
+            pool.add(req)
+        
+        pool.wait()
+        pool.clean()
+'''
 
 
 ################################
@@ -346,7 +405,7 @@ class OpInterpolate(Operator):
         minY, maxY = (black_y_ind.min(), black_y_ind.max())
         minX, maxX = (black_x_ind.min(), black_x_ind.max())
         
-        if method == 'linear':
+        if method == 'linear' or method == 'cubic' and n > 1:
             # do a convex combination of the slices to the left and to the right
             xs = np.linspace(0,1,n+2)
             left = volume[minZ,minY:maxY+1,minX:maxX+1]
@@ -417,10 +476,57 @@ class PseudoSVC(object):
         for k, patch in enumerate(X):
             out[k] = 1 if np.all(patch[1:] == 0) else 0
         return out
+    
+    
+class NotTrainedError(Exception):
+    pass
+
+class SVMManager(object):
+    '''
+    manages our SVMs for multiple bin numbers
+    '''
+    
+    _svms = {'version': 1}
+    
+    def get(self, n):
+        try:
+            return self._svms[n]
+        except KeyError:
+            raise NotTrainedError("Detector for bin size {} not trained.".format(n))
+    
+    def add(self, svm, n, overwrite=False):
+        if not n in self._svms.keys() or overwrite:
+            self._svms[n] = svm
+    
+    def remove(self, n):
+        try:
+            del self._svms[n]
+        except KeyError:
+            raise NotTrainedError("Detector for bin size {} not trained.".format(n))
+    
+    def has(self, n):
+        return n in self._svms
+    
+    def extract(self):
+        return self._svms
+    
+    def overload(self, obj):
+        if 'version' in obj and obj['version'] == self._svms['version']:
+            self._svms = obj
+            return
+        else:
+            try:
+                for n in obj['svm'].keys():
+                    for svm in obj['svm'][n].values():
+                        self.add(svm, n, overwrite=True)
+            except KeyError:
+                raise ValueError("Format not recognized.")
+
 
 def _chooseRandomSubset(data, n):
     choice = np.random.permutation(len(data))
-    return (data[choice[:n]],data[choice[n:]]) 
+    return (data[choice[:n]], choice[:n], data[choice[n:]], choice[n:]) 
+
 
 def _patchify(data, patchSize, haloSize):
     '''
@@ -446,7 +552,7 @@ def _patchify(data, patchSize, haloSize):
                 slice(patchSize*x, min( patchSize*(x+1), data.shape[1] ))) )
             
     return (patches, slices)
-    
+
 
 def _histogramIntersectionKernel(X,Y):
     '''
@@ -460,17 +566,26 @@ def _histogramIntersectionKernel(X,Y):
     return np.sum(np.minimum(A,B), axis=2)
 
 
-def _defaultTrainingSet(defectSize=128):
+_defaultBinSize = 30
+
+def _defaultTrainingHistograms():
     '''
     produce a standard training set with black regions
     '''
-    vol = vigra.VigraArray(((np.random.rand(200,200,50)-.5)*125+125).astype(np.uint8), axistags=vigra.defaultAxistags('xyz'))
-    labels = vigra.VigraArray(np.zeros((200,200,50),dtype=np.uint8), axistags=vigra.defaultAxistags('xyz'))
     
-    labels[70:70+defectSize,70:70+defectSize,1:3] = 2
-    labels[70:70+defectSize,70:70+defectSize,5:7] = 1
-    vol[70:70+defectSize,70:70+defectSize,5:7] = 0
-    return (vol, labels)
+    nHists = 100
+    hists = np.zeros((nHists, _defaultBinSize))
+    labels = np.zeros((nHists,))
+    
+    # generate nHists/2 positive sets
+    for i in range(nHists/2):
+        (hists[i,:],_) = np.histogram(np.zeros((64,64), dtype=np.uint8), bins=_defaultBinSize, range=(0,255), density=True)
+        labels[i] = 1
+    
+    for i in range(nHists/2,nHists):
+        (hists[i,:],_) = np.histogram(np.random.random_integers(60,180,(64,64)), bins=_defaultBinSize, range=(0,255), density=True)
+    
+    return (hists, labels)
 
 
 class OpDetectMissing(Operator):
@@ -482,20 +597,22 @@ class OpDetectMissing(Operator):
     PatchSize = InputSlot(value=128)
     HaloSize = InputSlot(value=30)
     DetectionMethod = InputSlot(value='classic')
-    NHistogramBins = InputSlot(value=30)
+    NHistogramBins = InputSlot(value=_defaultBinSize)
     
-    TrainingVolume = InputSlot(value = _defaultTrainingSet()[0])
+    #histograms: ndarray, shape: nHistograms x NHistogramBins.value
+    TrainingHistograms = InputSlot(value = _defaultTrainingHistograms()[0])
     
     # labels: {0: unknown, 1: missing, 2: good}
-    TrainingLabels = InputSlot(value = _defaultTrainingSet()[1])
-    NTrainingSamples = InputSlot(value=50)
+    TrainingLabels = InputSlot(value = _defaultTrainingHistograms()[1])
+    
+    NTrainingSamples = InputSlot(value=np.inf)
     
     Output = OutputSlot()
     
     
     
     ### PRIVATE ###
-    _detectors = {'svm': {}, 'classic': {}}
+    _manager = SVMManager()
     _inputRange = (0,255)
     
     
@@ -505,19 +622,12 @@ class OpDetectMissing(Operator):
         
     def propagateDirty(self, slot, subindex, roi):
         if slot == self.InputVolume:
-            #FIXME what about change of patch size and so on?
             self.Output.setDirty(roi)
     
     
     def setupOutputs(self):
         self.Output.meta.assignFrom( self.InputVolume.meta )
         self.Output.meta.dtype = np.uint8
-        
-        tags = self.TrainingVolume.meta.getTaggedShape()
-        if 't' in tags: assert tags['t'] == 1, "Time axis must be singleton"
-        if 'c' in tags: assert tags['c'] == 1, "Channel axis must be singleton"
-        assert self.TrainingVolume.meta.getTaggedShape() == self.TrainingLabels.meta.getTaggedShape(), \
-            "Training labels and training volume must have the same shape."  
         
         # determine range of input
         if self.InputVolume.meta.dtype == np.uint8:
@@ -552,12 +662,14 @@ class OpDetectMissing(Operator):
         return result
     
     
-    def dumps(self):
-        return pickle.dumps(self._detectors)
+    @staticmethod
+    def dumps():
+        return pickle.dumps(OpDetectMissing._manager.extract())
     
     
-    def loads(self, s):
-        self._detectors = pickle.loads(s)
+    @staticmethod
+    def loads(s):
+        OpDetectMissing._manager.overload(pickle.loads(s))
     
 
     def _detectMissing(self, slot, data):
@@ -605,7 +717,7 @@ class OpDetectMissing(Operator):
                 (hist, _) = np.histogram(patch, bins=self.NHistogramBins.value, range=self._inputRange, density=True)
                 hists.append(hist)
             
-            pred = self._predict(hists, nPatchElements)
+            pred = self._predict(hists)
             
             for i, p in enumerate(pred):
                 if p > 0: 
@@ -621,107 +733,25 @@ class OpDetectMissing(Operator):
         (retrains only if patch size is currently untrained or force is True)
         '''
         
-        patchSize = self.PatchSize.value + self.HaloSize.value
         
         # return early if unneccessary
-        if not force and self._haveDetector(patchSize**2):
+        if not force and OpDetectMissing._manager.has(self.NHistogramBins.value):
             return
         
-        logger.debug("Training for {} patch elements ...".format(patchSize**2))
+        logger.debug("Training for {} histogram bins ...".format(self.NHistogramBins.value))
         
-        if self.DetectionMethod.value == 'classic':
-            # just insert the pseudo classifier
-            self._fit([], [], patchSize**2)
+        if self.DetectionMethod.value == 'classic' or not havesklearn:
+            # no need to train this
             return
         
-        vol = vigra.taggedView(self.TrainingVolume[:].wait(),axistags=self.TrainingVolume.meta.axistags).withAxes(*'zyx')
-        labels = vigra.taggedView(self.TrainingLabels[:].wait(),axistags=self.TrainingLabels.meta.axistags).withAxes(*'zyx')
+        labels = self.TrainingLabels[:].wait()
+        histograms = self.TrainingHistograms[:].wait()
         
-        #BEGIN subroutine
-        def _extractHistograms(vol, cond, nPatches=10):
-            
-            out = []
-            
-            ind_z, ind_y, ind_x = np.where(cond.view(np.ndarray))
-            
-            choice = np.random.permutation(len(ind_x))
-            
-            for i, z,y,x in zip(range(len(choice)), ind_z[choice], ind_y[choice],ind_x[choice]):
-                if i%50000==0:
-                    logger.debug("extracing histograms, {}/{} done".format(i, len(choice)))
-                
-                if len(out)>=nPatches:
-                    break
-                ymin = y - patchSize//2
-                ymax = ymin + patchSize
-                xmin = x - patchSize//2
-                xmax = xmin + patchSize
-                
-                if not (xmin < 0 or ymin < 0 or xmax > vol.shape[2] or ymax > vol.shape[1]):
-                    # valid patch, add it to the output
-                    (hist, _) = np.histogram(vol[z,ymin:ymax,xmin:xmax], bins=self.NHistogramBins.value, range=self._inputRange, \
-                                             density = True)
-                    out.append(hist)
-                
-            return out
-        #END subroutine
+        neg_inds = np.where(labels==0)[0]
+        pos_inds = np.setdiff1d(np.arange(len(labels)), neg_inds)
         
-        histograms = [0,0]
-        logger.debug("starting extraction!")
-        def partFun(i):
-            if i==0:
-                histograms[i] = _extractHistograms(vol, labels == 2, nPatches = np.inf)
-            else:
-                histograms[i] = _extractHistograms(vol, labels == 1, nPatches = np.inf)
-        
-        
-        ### BEGIN UNSORTED MESS OF TEMPORARY STORAGE ### 
-        #TODO clean-up
-        
-        #raise NotImplementedError("clean this up!")
-        import os.path
-        fn = "/home/akreshuk/temp_histo_storage.pkl"
-        if os.path.exists(fn):
-            with open(fn) as f:
-                histograms = pickle.load(f)
-            if len(histograms)==0:
-                logger.debug("Was not able to load training data from {} :(".format(fn))
-                return
-            else:
-                logger.debug("Loaded training data from {}.".format(fn))
-        else:
-            pool = RequestPool()
-
-            for i in range(len(histograms)):
-                req = Request(partial(partFun, i))
-                pool.add(req)
-            
-            pool.wait()
-            pool.clean()
-            with open(fn, "w") as f:
-                pickle.dump(histograms, f)
-            logger.debug("Dumped training data to {}.".format(fn))
-        
-        
-        '''
-        pool = RequestPool()
-
-        for i in range(len(histograms)):
-            req = Request(partial(partFun, i))
-            pool.add(req)
-        
-        pool.wait()
-        pool.clean()
-        '''
-        ### END UNSORTED MESS OF TEMPORARY STORAGE ### 
-        
-        bad = histograms[1]
-        good = histograms[0]
-        
-        
-        #FIXME use ndarray from the beginning!
-        pos = np.asarray(bad)
-        neg = np.asarray(good)
+        pos = histograms[pos_inds]
+        neg = histograms[neg_inds]
         npos = len(pos)
         nneg = len(neg)
 
@@ -729,44 +759,42 @@ class OpDetectMissing(Operator):
         nfolds = 10
         pos_random = np.random.permutation(len(pos))
         neg_random = np.random.permutation(len(neg))
-        #return (data[choice[:n]],data[choice[n:]]) 
-        templogfile = open("/home/akreshuk/scripts/crossvalidation.txt", "w")
-        for i in range(nfolds):
-            logger.debug("starting cross validation fold {}".format(i))
-            #print pos_random.shape, pos.shape
-            posTest=pos[pos_random[i*npos/nfolds:(i+1)*npos/nfolds],:]
-            #print posTest.shape
-            posTrain = np.vstack((pos[pos_random[0:npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
-            
-            negTest=neg[neg_random[i*nneg/nfolds:(i+1)*nneg/nfolds],:]
-            negTrain = np.vstack((neg[neg_random[0:i*nneg/nfolds],:], neg[neg_random[(i+1)*nneg/nfolds:],:]))
-            
-            #(posTest, posTrain) = _chooseRandomSubset(pos, len(pos)/20)
-            #(negTest, negTrain) = _chooseRandomSubset(neg, len(neg)/20)
-            logger.debug("positive training shape {}, negative training shape {}, positive testing shape {}, negative testing shape {}".format(posTrain.shape, negTrain.shape, posTest.shape, negTest.shape))
-        
 
+        with open("/tmp/crossvalidation.txt", "w") as templogfile:
+            for i in range(nfolds):
+                logger.debug("starting cross validation fold {}".format(i))
+                
+                # partition the set in training and test data, use i-th for testing
+                posTest=pos[pos_random[i*npos/nfolds:(i+1)*npos/nfolds],:]
+                posTrain = np.vstack((pos[pos_random[0:npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
+                
+                negTest=neg[neg_random[i*nneg/nfolds:(i+1)*nneg/nfolds],:]
+                negTrain = np.vstack((neg[neg_random[0:i*nneg/nfolds],:], neg[neg_random[(i+1)*nneg/nfolds:],:]))
+                
+                logger.debug("positive training shape {}, negative training shape {}, positive testing shape {}, negative testing shape {}".format(posTrain.shape, negTrain.shape, posTest.shape, negTest.shape))
 
-            if len(posTrain) < self.NTrainingSamples.value or len(negTrain) < self.NTrainingSamples.value:
-                logger.error("Could not extract enough training data from volume (bad: {}, good: {} < needed: {} !) - training aborted.".format(len(badTrain), len(goodTrain), self.NTrainingSamples.value))
-                return
-        
-            logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(neg), len(pos)))
-            self._felzenszwalbTraining(negTrain, posTrain)
-        
-            predNeg = self._predict(negTest, patchSize**2)
-            predPos = self._predict(posTest, patchSize**2)
-        
-            fp = (predNeg.sum())/float(predNeg.size)
-            fn = (predPos.size - predPos.sum())/float(predPos.size)
-            prec = predPos.sum()/float(predPos.sum()+predNeg.sum())
-        
-            logger.info(" Finished training, results of cross validation: FPR %.5f, FNR %.5f (recall %.5f, precision: %.5f)." % (fp, fn, 1-fn, prec))
-            templogfile.write(str(fp)+" "+str(fn)+" "+str(1-fn)+" "+str(prec)+"\n")
-        templogfile.close()
+                if (not np.isinf(self.NTrainingSamples.value)) and \
+                    (len(posTrain) < self.NTrainingSamples.value or len(negTrain) < self.NTrainingSamples.value):
+                    logger.error("Could not extract enough training data from volume (positive: {}, negative: {} < needed: {} !) - training aborted.".format(len(posTrain), len(negTrain), self.NTrainingSamples.value))
+                    return
+            
+                logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(neg), len(pos)))
+                self._felzenszwalbTraining(negTrain, posTrain)
+            
+
+                predNeg = self._predict(negTest)
+                predPos = self._predict(posTest)
+
+            
+                fp = (predNeg.sum())/float(predNeg.size)
+                fn = (predPos.size - predPos.sum())/float(predPos.size)
+                prec = predPos.sum()/float(predPos.sum()+predNeg.sum())
+            
+                logger.info(" Finished training. Results of cross validation: FPR %.5f, FNR %.5f (recall %.5f, precision: %.5f)." % (fp, fn, 1-fn, prec))
+                templogfile.write(str(fp)+" "+str(fn)+" "+str(1-fn)+" "+str(prec)+"\n")
         
             
-    def _felzenszwalbTraining(self, good, bad):
+    def _felzenszwalbTraining(self, negative, positive):
         '''
         we want to train on a 'hard' subset of the non-defective training data, see
         FELZENSZWALB ET AL.: OBJECT DETECTION WITH DISCRIMINATIVELY TRAINED PART-BASED MODELS (4.4), PAMI 32/9
@@ -774,60 +802,60 @@ class OpDetectMissing(Operator):
         
         #TODO sanity checks
         
-        nSamples = self.NTrainingSamples.value
         n = (self.PatchSize.value + self.HaloSize.value)**2
         
         #FIXME arbitrary
-        firstSamples = 1000
-        maxSamples = 3000
-        hardMaxSamples = 5500 #never exceed this number of training samples
+        firstSamples = 200
+        maxRemovePerStep = 0
+        maxAddPerStep = 300
+        maxSamples = 1500
+        nTrainingSteps = 4
         
-        samples = [good,bad]
+        # initial choice of training samples
+        (initNegative,choiceNegative, _, _) = _chooseRandomSubset(negative, min(firstSamples, len(negative)))
+        (initPositive,choicePositive, _, _) = _chooseRandomSubset(positive, min(firstSamples, len(positive)))
         
-        ## suppose we have a list of training samples, good and bad
-        
-        #both = set(range(len(good)))
-        
-        # initial choice C_1
-        choiceGood = np.random.permutation(len(good))[0:nSamples]
-        choiceBad = np.random.permutation(len(bad))[0:nSamples]
-        choice = [choiceGood, choiceBad]
-        G_t = good[list(choiceGood)]
-        B_t = bad[list(choiceBad)]
-        S_t = [G_t, B_t]
+        # setup for parallel training
+        samples = [negative,positive]
+        choice = [choiceNegative, choicePositive]
+        S_t = [initNegative, initPositive]
         
         finished = [False, False]
         
         ### BEGIN SUBROUTINE ###
-        def felzenstep(x, choice, ind):
+        def felzenstep(x, cache, ind):
             
-            pred = self._predict(x, n)
+            case = ("positive" if ind>0 else "negative") + " set"
+            pred = self._predict(x)
             
-            #hard = set([i for i in range(len(pred)) if pred[i]!=ind])
-            hard = np.where(pred!=ind)[0]
-            logger.debug("currently {} hard examples with ind {}".format(len(hard), ind))
-            
-            if len(hard) >maxSamples-firstSamples:
-                logger.debug("Cutting training set, too many samples.")
-                hard = np.random.permutation(hard)[0:maxSamples-firstSamples]
-                
-            
-                
-            #choice |= hard
-            #choice = np.union1d(choice[0:firstSamples], hard)
-            choice = np.union1d(choice, hard)
-            if len(choice)>hardMaxSamples:
-                choice = np.random.permutation(choice)[0:hardMaxSamples]
+            hard = np.where(pred != ind)[0]
+            easy = np.setdiff1d(range(len(x)), hard)
+            logger.debug(" {}: currently {} hard and {} easy samples".format(\
+                case, len(hard), len(easy)))
 
-            C = x[choice]
-            logger.debug("expanded set to {} elements".format(len(C)))
-            '''
-            if len(C) > maxSamples: 
-                logger.debug("Cutting training set, too many samples.")
-                choice = np.random.permutation(choice)[0:maxSamples]
-                C = x[choice]
-            '''
-            return (C,choice,len(hard)==0)
+            # shrink the cache
+            easyInCache = np.intersect1d(easy, cache) if len(easy)>0 else []
+            if len(easyInCache)>10: #FIXME arbitrary
+                (removeFromCache, _, _, _) = _chooseRandomSubset(easyInCache, min(len(easyInCache), maxRemovePerStep))
+                cache = np.setdiff1d(cache, removeFromCache)
+                logger.debug(" {}: shrunk the cache by {} elements".format(case, len(removeFromCache)))
+                
+            # grow the cache
+            temp = len(cache)
+            addToCache = _chooseRandomSubset(hard, min(len(hard), maxAddPerStep))[0]
+            cache = np.union1d(cache, addToCache)
+            addedHard = len(cache)-temp
+            logger.debug(" {}: grown the cache by {} elements".format(case, addedHard))
+            
+            if len(cache) > maxSamples:
+                logger.debug(" {}: Cache to big, removing elements.".format(case))
+                (cache,_,_,_) = _chooseRandomSubset(cache, maxSamples)
+            
+            # apply the cache
+            C = x[cache]
+            #logger.debug(" {}: expanded set to {} elements".format(case, len(C)))
+            
+            return (C,cache,addedHard==0)
         ### END SUBROUTINE ###
         
         ### BEGIN PARALLELIZATION FUNCTION ###
@@ -838,10 +866,10 @@ class OpDetectMissing(Operator):
             finished[i] = newFinished
         ### END PARALLELIZATION FUNCTION ###
         
-        for k in range(4): #just count iterations
+        for k in range(nTrainingSteps): #just count iterations
 
-            logger.debug(" Felzenszwalb Training (step {}): {} hard negative samples, {} hard positive samples.".format(k+1, len(S_t[0]), len(S_t[1])))
-            self._fit(S_t[0], S_t[1], n)
+            logger.debug("Felzenszwalb Training (step {}/{}): {} hard negative samples, {} hard positive samples.".format(k+1,nTrainingSteps, len(S_t[0]), len(S_t[1])))
+            self._fit(S_t[0], S_t[1])
             
             pool = RequestPool()
 
@@ -855,41 +883,41 @@ class OpDetectMissing(Operator):
             if np.all(finished): 
                 #already have all hard examples in training set
                 break
-            
-        self._fit(S_t[0], S_t[1], n)
-        #fp = float(len(hardGood))/len(good)
-        #fn = float(len(hardBad))/len(bad)
-        
-        #logger.debug(" Finished Felzenszwalb Training. Remaining: %02.3f%% false positives, %02.3f%% false negatives on training set." % (fp*100, fn*100))
+
+        self._fit(S_t[0], S_t[1])
         
         logger.debug(" Finished Felzenszwalb Training.")
-        #TODO summary??
-         
-    def _fit(self, good, bad, nPatchElements):
+    
+    
+    def _fit(self, negative, positive):
         '''
         train the underlying SVM
         '''
         
-        self._prepareDict(nPatchElements)
+        if self.DetectionMethod.value == 'classic' or not havesklearn:
+            return
         
-        labelGood = [0]*len(good)
-        labelBad = [1]*len(bad)
+        labels = [0]*len(negative) + [1]*len(positive)
+        samples = np.vstack( (negative,positive) )
         
-        x = np.vstack( (good,bad) )
-        y = labelGood+labelBad
-        self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements].fit(x, y)
+        svm = SVC(C=1000, kernel=_histogramIntersectionKernel)
+        
+        svm.fit(samples, labels)
+        
+        OpDetectMissing._manager.add(svm, self.NHistogramBins.value, overwrite=True)
         
         
-    def _predict(self, X, nPatchElements):
+    def _predict(self, X):
         '''
         predict if the histograms in X correspond to missing regions
         do this for subsets of X in parallel
         '''
         
-        #FIXME do this parallel (RequestPool)
-        #svm = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements]
-        #print self._detectors.items()
-        svm = self._detectors['svm'][30][24964]
+        if self.DetectionMethod.value == 'classic' or not havesklearn:
+            svm = PseudoSVC()
+        else:
+            svm = OpDetectMissing._manager.get(self.NHistogramBins.value)
+        
         y = np.zeros((len(X),))*np.nan
         
         pool = RequestPool()
@@ -911,46 +939,7 @@ class OpDetectMissing(Operator):
         
         assert not np.any(np.isnan(y))
         return np.asarray(y)
-    
-    
-    def _haveDetector(self, n):
-        '''
-        detector already trained?
-        '''
-        
-        try:
-            det = self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][n]
-            return True
-        except KeyError:
-            return False
-    
-    
-    def _prepareDict(self, nPatchElements):
-        '''
-        prepares the attribute _detectors for training
-        '''
-        
-        # base dictionary
-        if not isinstance(self._detectors, dict):
-            self._detectors = {self.DetectionMethod.value: {}}
-        
-        # dictionary of detection methods
-        if not self.DetectionMethod.value in self._detectors.keys() or \
-            not isinstance(self._detectors[self.DetectionMethod.value], dict):
-            self._detectors[self.DetectionMethod.value] = {}
-        
-        # dictionary of histogram sizes
-        if not self.NHistogramBins.value in self._detectors[self.DetectionMethod.value].keys() or \
-            not isinstance(self._detectors[self.DetectionMethod.value][self.NHistogramBins.value], dict):
-            self._detectors[self.DetectionMethod.value][self.NHistogramBins.value] = {}
-        
-        # detector
-        if self.DetectionMethod.value == 'svm' and havesklearn:                                                                                                                                           
-            self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = SVC(C=1000, kernel=_histogramIntersectionKernel)                                                                                          
-        else:                                                                                                                                                                                             
-            self._detectors[self.DetectionMethod.value][self.NHistogramBins.value][nPatchElements] = PseudoSVC() 
-        
-        
+
 
 if __name__ == "__main__":
     
@@ -989,7 +978,7 @@ if __name__ == "__main__":
     
     # labels: {0: unknown, 1: missing, 2: good}
     op.TrainingLabels.setValue(labels)
-    op.NTrainingSamples.setValue(1000)
+    op.NTrainingSamples.setValue(np.inf)
     
     
     op.InputVolume.setValue(data)

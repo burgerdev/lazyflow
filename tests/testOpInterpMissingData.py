@@ -352,6 +352,20 @@ class TestInterpMissingData(unittest.TestCase):
         op = OpInterpMissingData(graph = g)
         self.op = op
     
+    def testDetectorPropagation(self):
+        (volume, _, expected) = _getTestVolume(_testDescriptions[0], 'linear')
+        self.op.InputVolume.setValue(volume)
+        _ = self.op.Output[:].wait()
+        s = self.op.Detector[:].wait()
+        
+        g=Graph()
+        op2 = OpInterpMissingData(graph = g)
+        op2.InputVolume.setValue(volume)
+        op2.OverloadDetector.setValue(s)
+        
+        assert op2.detector._manager.has(op2.detector.NHistogramBins.value)
+        
+    
     def testLinearBasics(self):
         self.op.InputSearchDepth.setValue(0)
         
@@ -362,6 +376,10 @@ class TestInterpMissingData(unittest.TestCase):
             (volume, _, expected) = _getTestVolume(desc, interpolationMethod)
             self.op.InputVolume.setValue( volume )
             self.op.PatchSize.setValue( volume.shape[0] )
+            print(self.op.Output[:].wait().view(np.ndarray)[0,0,:])
+            print(self.op.Missing[:].wait().view(np.ndarray)[0,0,:])
+            print(" != ")
+            print(expected.view(np.ndarray)[0,0,:])
             assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray), expected.view(np.ndarray), decimal=2, err_msg="method='{}', test='{}'".format(interpolationMethod, desc))
         
     
