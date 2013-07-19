@@ -217,56 +217,85 @@ class OpInterpMissingData(Operator):
         return (offset_top,offset_bot)
         
         
-'''FIXME sort that into OpInterpMissingData
-#BEGIN subroutine
-        def _extractHistograms(vol, cond, nPatches=10):
-            
-            out = []
-            
-            ind_z, ind_y, ind_x = np.where(cond.view(np.ndarray))
-            
-            choice = np.random.permutation(len(ind_x))
-            
-            for i, z,y,x in zip(range(len(choice)), ind_z[choice], ind_y[choice],ind_x[choice]):
-                
-                if len(out)>=nPatches:
-                    logger.debug(" Finished extracting {} histograms.".format(len(out)))
-                    break
-                    
-                if i%50000==0:
-                    logger.debug(" Extracting histograms, {}/{} done ...".format(i, len(choice)))
-                    
-                ymin = y - patchSize//2
-                ymax = ymin + patchSize
-                xmin = x - patchSize//2
-                xmax = xmin + patchSize
-                
-                if not (xmin < 0 or ymin < 0 or xmax > vol.shape[2] or ymax > vol.shape[1]):
-                    # valid patch, add it to the output
-                    (hist, _) = np.histogram(vol[z,ymin:ymax,xmin:xmax], bins=self.NHistogramBins.value, range=self._inputRange, \
-                                             density = True)
-                    out.append(hist)
-                
-            return out
-        #END subroutine
-        
-        histograms = [0,0]
-        logger.debug(" Starting histogram extraction.")
-        def partFun(i):
-            if i==0:
-                histograms[i] = _extractHistograms(vol, labels == 2, nPatches = self.NTrainingSamples.value)
-            else:
-                histograms[i] = _extractHistograms(vol, labels == 1, nPatches = self.NTrainingSamples.value)
-        
-        pool = RequestPool()
+### HISTOGRAM EXTRACION FUNCTION ###
 
-        for i in range(len(histograms)):
-            req = Request(partial(partFun, i))
-            pool.add(req)
+def extractHistograms(volume, labels, patchSize = 64, nBins=30, intRange=(0,255)):
+    '''
+    extracts histograms from 3d-volume 
+     - labels are
+        0       ignore
+        1       positive
+        2       negative
+     - histogram extraction is attempted to be done in parallel
+     - patches that intersect with the volume border are discarded
+     - volume and labels must be 3d, and in order 'zyx' (if not VigraArrays)
+     - returns: np.ndarray, shape: (nSamples,nBins+1), last column is the label
+    '''
+    
+    # sanity checks
+    assert len(volume.shape) == 3, "Volume must be 3d data"
+    assert volume.shape == labels.shape, "Volume and labels must have the same shape"
+    
+    try:
+        volumeZYX = volume.withAxes(*'zyx')
+        labelsZYX = labels.withAxes(*'zyx')
+    except AttributeError:
+        # can't blame me
+        volumeZYX = volume
+        labelsZYX = labels
+        pass
+    
+    
+    # fill list of patch centers (VigraArray does not support bitwise_or)
+    ind_z, ind_y, ind_x = np.where((labelsZYX==1).view(np.ndarray) | (labelsZYX==2).view(np.ndarray))
+    index = np.arange(len(ind_z))
+    
+    # prepare chunking of histogram centers
+    chunkSize = 1000 #FIXME magic number??
+    nChunks = len(index)//chunkSize + (1 if len(index) % chunkSize > 0 else 0)
+    s = [slice(k*chunkSize,min((k+1)*chunkSize,len(index))) for k in range(nChunks)]
+    histoList = [None]*nChunks
+    
+    # prepare subroutine for parallel extraction
+    
+    #BEGIN subroutine
+    def _extract(index):
         
-        pool.wait()
-        pool.clean()
-'''
+        out = []
+        
+        for z,y,x in zip(ind_z[index], ind_y[index],ind_x[index]):
+            ymin = y - patchSize//2
+            ymax = ymin + patchSize
+            xmin = x - patchSize//2
+            xmax = xmin + patchSize
+            
+            if not (xmin < 0 or ymin < 0 or xmax > volumeZYX.shape[2] or ymax > volumeZYX.shape[1]):
+                # valid patch, add it to the output
+                hist = np.zeros((nBins+1,))
+                (hist[:nBins], _) = np.histogram(volumeZYX[z,ymin:ymax,xmin:xmax], bins=nBins, range=intRange, \
+                                            density = True)
+                hist[nBins] = 1 if labelsZYX[z,y,x] == 1 else 0
+                out.append(hist)
+            
+        return np.vstack(out) if len(out) > 0 else np.zeros((0,nBins+1))
+
+    def partFun(i):
+        histoList[i] = _extract(index[s[i]])
+    #END subroutine
+    
+    # pool the extraction requests
+    pool = RequestPool()
+    
+    for i in range(nChunks):
+        req = Request(partial(partFun, i))
+        pool.add(req)
+    
+    pool.wait()
+    pool.clean()
+    
+    return np.vstack(histoList)
+    
+    
 
 
 ################################
@@ -574,18 +603,18 @@ def _defaultTrainingHistograms():
     '''
     
     nHists = 100
-    hists = np.zeros((nHists, _defaultBinSize))
-    labels = np.zeros((nHists,))
+    n = _defaultBinSize+1
+    hists = np.zeros((nHists, n))
     
     # generate nHists/2 positive sets
     for i in range(nHists/2):
-        (hists[i,:],_) = np.histogram(np.zeros((64,64), dtype=np.uint8), bins=_defaultBinSize, range=(0,255), density=True)
-        labels[i] = 1
+        (hists[i,:n-1],_) = np.histogram(np.zeros((64,64), dtype=np.uint8), bins=_defaultBinSize, range=(0,255), density=True)
+        hists[i,n-1] = 1
     
     for i in range(nHists/2,nHists):
-        (hists[i,:],_) = np.histogram(np.random.random_integers(60,180,(64,64)), bins=_defaultBinSize, range=(0,255), density=True)
+        (hists[i,:n-1],_) = np.histogram(np.random.random_integers(60,180,(64,64)), bins=_defaultBinSize, range=(0,255), density=True)
     
-    return (hists, labels)
+    return hists
 
 
 class OpDetectMissing(Operator):
@@ -599,13 +628,10 @@ class OpDetectMissing(Operator):
     DetectionMethod = InputSlot(value='classic')
     NHistogramBins = InputSlot(value=_defaultBinSize)
     
-    #histograms: ndarray, shape: nHistograms x NHistogramBins.value
-    TrainingHistograms = InputSlot(value = _defaultTrainingHistograms()[0])
+    #histograms: ndarray, shape: nHistograms x (NHistogramBins.value + 1)
+    # the last column holds the label, i.e. {0: negative, 1: positive}
+    TrainingHistograms = InputSlot(value = _defaultTrainingHistograms())
     
-    # labels: {0: unknown, 1: missing, 2: good}
-    TrainingLabels = InputSlot(value = _defaultTrainingHistograms()[1])
-    
-    NTrainingSamples = InputSlot(value=np.inf)
     
     Output = OutputSlot()
     
@@ -729,8 +755,8 @@ class OpDetectMissing(Operator):
         
     def _train(self, force=False):
         '''
-        trains with samples drawn from slots TrainingVolume and TrainingLabels
-        (retrains only if patch size is currently untrained or force is True)
+        trains with samples drawn from slot TrainingHistograms
+        (retrains only if bin size is currently untrained or force is True)
         '''
         
         
@@ -744,8 +770,14 @@ class OpDetectMissing(Operator):
             # no need to train this
             return
         
-        labels = self.TrainingLabels[:].wait()
         histograms = self.TrainingHistograms[:].wait()
+        
+        assert histograms.shape[1] == self.NHistogramBins.value+1 and \
+            len(histograms.shape) == 2, \
+            "Training data has wrong shape (expected: (n,{}), got: {}.".format(self.NHistogramBins.value+1, histograms.shape)
+        
+        labels = histograms[:,-1]
+        histograms = histograms[:,:self.NHistogramBins.value]
         
         neg_inds = np.where(labels==0)[0]
         pos_inds = np.setdiff1d(np.arange(len(labels)), neg_inds)
@@ -773,11 +805,8 @@ class OpDetectMissing(Operator):
                 
                 logger.debug("positive training shape {}, negative training shape {}, positive testing shape {}, negative testing shape {}".format(posTrain.shape, negTrain.shape, posTest.shape, negTest.shape))
 
-                if (not np.isinf(self.NTrainingSamples.value)) and \
-                    (len(posTrain) < self.NTrainingSamples.value or len(negTrain) < self.NTrainingSamples.value):
-                    logger.error("Could not extract enough training data from volume (positive: {}, negative: {} < needed: {} !) - training aborted.".format(len(posTrain), len(negTrain), self.NTrainingSamples.value))
-                    return
-            
+                #FIXME do we need a minimum training set size??
+                
                 logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(neg), len(pos)))
                 self._felzenszwalbTraining(negTrain, posTrain)
             
@@ -944,54 +973,73 @@ class OpDetectMissing(Operator):
 if __name__ == "__main__":
     
     import tempfile
-    from sys import argv, exit
+    import argparse
+    import os.path
+    
     from lazyflow.graph import Graph
     
     from lazyflow.operators.opInterpMissingData import _histogramIntersectionKernel, PseudoSVC
     
-    if len(argv)<3:
-        print("Usage: {} <volume> <labels>".format(argv[0]))
-        exit(1)
+    parser = argparse.ArgumentParser(description='Train a missing slice detector')
+    parser.add_argument('file', nargs='*', action='store', help="volume and labels (if omitted, '-f' must be given)")
+    parser.add_argument('-f', action='store', default=None, dest='histfile', help='pickled histograms (if not existing, histograms get calculated from volume and label files and stored there.')
+    parser.add_argument('-d', dest='detfile', action='store', default=None, help='Output file for detector (will be a temporary file if omitted)')
+    parser.add_argument('--patch', dest='patchSize', action='store', default='64', help='patch size')
+    parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size')
+    parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins')
     
-    volumeFile = argv[1]
-    labelFile = argv[2]
     
-    patchSize = 128
-    haloSize = 30
+    args = parser.parse_args()
+    patchSize = int(args.patchSize)
+    haloSize = int(args.haloSize)
+    binSize = int(args.haloSize)
     
     logging.basicConfig()
     logger.setLevel(logging.DEBUG)
     
-    logger.debug("Training...")
+    startFromLabels = args.histfile is None or not os.path.exists(args.histfile)
     
-    data = vigra.impex.readHDF5(volumeFile, '/volume/data').withAxes(*'zyx')
-    labels = vigra.impex.readHDF5(labelFile, '/volume/data').withAxes(*'zyx')
+    logger.debug("Gathering histograms...")
+    
+    if startFromLabels:
+        assert len(args.file) == 2, "If there are no histograms available, volume and labels must be provided."
+        logger.debug("Computing histograms (this could take a while)...")
+        volume = vigra.impex.readHDF5(args.file[0], '/volume/data').withAxes(*'zyx')
+        labels = vigra.impex.readHDF5(args.file[1], '/volume/data').withAxes(*'zyx')
+        histograms = extractHistograms(volume, labels, patchSize = patchSize+haloSize, nBins=binSize, intRange=(0,255))
+        
+        if args.histfile is not None:
+            with open(args.histfile, 'w') as f:
+                pickle.dump(histograms, f)
+                logger.debug("Dumped training data to {}.".format(args.histfile))
+        
+    else:
+        with open(args.histfile) as f:
+            histograms = pickle.load(f)
+            logger.debug("Loaded training data from {}.".format(args.histfile))
+    
+    
+    
+    logger.debug("Training...")
     
     op = OpDetectMissing(graph=Graph())
 
     op.PatchSize.setValue(patchSize)
     op.HaloSize.setValue(haloSize)
     op.DetectionMethod.setValue('svm')
-    op.NHistogramBins.setValue(30)
+    op.NHistogramBins.setValue(binSize)
     
-    op.TrainingVolume.setValue(data)
+    op.TrainingHistograms.setValue(histograms)
     
-    # labels: {0: unknown, 1: missing, 2: good}
-    op.TrainingLabels.setValue(labels)
-    op.NTrainingSamples.setValue(np.inf)
-    
-    
-    op.InputVolume.setValue(data)
-    
-    det = op.Output[:].wait()
+    op._train(force=True)
     
     try:
-        if len(argv)<4:
+        if args.detfile is None:
             with tempfile.NamedTemporaryFile(suffix='.pkl', prefix='detector_', delete=False) as f:
                 logger.debug("Detector written to {}".format(f.name))
                 f.write(op.dumps())
         else:
-            with open(argv[3],'w') as f:
+            with open(args.detfile,'w') as f:
                 logger.debug("Detector written to {}".format(f.name))
                 f.write(op.dumps())
     except Exception as e:
