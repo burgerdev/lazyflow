@@ -39,12 +39,15 @@ class OpInterpMissingData(Operator):
     DetectionMethod = InputSlot(value='svm')
     InterpolationMethod = InputSlot(value='cubic')
     OverloadDetector = InputSlot(value='')
+    TrainDetector = InputSlot(value=0)
+    
       
     Output = OutputSlot()
     Missing = OutputSlot()
     Detector = OutputSlot(stype=Opaque)
     
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
+    _dirty = False
     
     def __init__(self, *args, **kwargs):
         super(OpInterpMissingData, self).__init__(*args, **kwargs)
@@ -69,6 +72,14 @@ class OpInterpMissingData(Operator):
     
     def loads(self, s):
         self.detector.loads(s)
+        
+    def isDirty(self):
+        return self._dirty
+    
+    def resetDirty(self):
+        self._dirty = False
+    
+        
 
     def setupOutputs(self):
         # Output has the same shape/axes/dtype/drange as input
@@ -142,6 +153,11 @@ class OpInterpMissingData(Operator):
         if slot == self.OverloadDetector:
             s = self.OverloadDetector.value
             self.loads(s)
+            self._dirty = True
+        
+        if slot == self.TrainDetector:
+            self.detector.train(force=True)
+            self._dirty = True
         
         
         
@@ -724,7 +740,7 @@ class OpDetectMissing(Operator):
             "Data must be 3d with axis 'zyx'."
         
         if not OpDetectMissing._manager.has(self.NHistogramBins.value):
-            self._train()
+            self.train()
         
         result = vigra.VigraArray(data)*0
         
@@ -765,16 +781,14 @@ class OpDetectMissing(Operator):
         return result
         
         
-    def _train(self, force=False):
+    def train(self, force=False):
         '''
         trains with samples drawn from slot TrainingHistograms
         (retrains only if bin size is currently untrained or force is True)
         '''
         
-        #FIXME unneccessary force input        
-        
         # return early if unneccessary
-        if not OpDetectMissing._needsTraining and OpDetectMissing._manager.has(self.NHistogramBins.value):
+        if not force and not OpDetectMissing._needsTraining and OpDetectMissing._manager.has(self.NHistogramBins.value):
             return
         
         logger.debug("Training for {} histogram bins ...".format(self.NHistogramBins.value))
@@ -1059,7 +1073,7 @@ if __name__ == "__main__":
     
     op.TrainingHistograms.setValue(histograms)
     
-    op._train(force=True)
+    op.train(force=True)
     
     try:
         if args.detfile is None:
