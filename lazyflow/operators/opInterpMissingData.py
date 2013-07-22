@@ -219,7 +219,7 @@ class OpInterpMissingData(Operator):
         return (offset_top,offset_bot)
         
         
-### HISTOGRAM EXTRACION FUNCTION ###
+### HISTOGRAM EXTRACTION FUNCTION ###
 
 def extractHistograms(volume, labels, patchSize = 64, nBins=30, intRange=(0,255)):
     '''
@@ -337,6 +337,7 @@ class OpInterpolate(Operator):
     Output = OutputSlot()
     
     _requiredMargin = {'cubic': 2, 'linear': 1, 'constant': 0}
+    _maxInterpolationDistance = {'cubic': 1, 'linear': np.inf, 'constant': np.inf}
     _fallbacks = {'cubic': 'linear', 'linear': 'constant', 'constant': None}
     
     def propagateDirty(self, slot, subindex, roi):
@@ -412,9 +413,12 @@ class OpInterpolate(Operator):
         # number and z-location of missing slices (z-axis is at zero)
         black_z_ind, black_y_ind, black_x_ind = np.where(missing)
         
-        
         if len(black_z_ind) == 0: # no need for interpolation
             return 
+            
+        if black_z_ind.max() - black_z_ind.min() + 1 > self._maxInterpolationDistance[method]:
+            self._interpolate(volume, missing, self._fallbacks[method])
+            return
         
         # indices with respect to the required margin around the missing values
         minZ = black_z_ind.min() - self._requiredMargin[method]
@@ -436,7 +440,7 @@ class OpInterpolate(Operator):
         minY, maxY = (black_y_ind.min(), black_y_ind.max())
         minX, maxX = (black_x_ind.min(), black_x_ind.max())
         
-        if method == 'linear' or method == 'cubic' and n > 1:
+        if method == 'linear':
             # do a convex combination of the slices to the left and to the right
             xs = np.linspace(0,1,n+2)
             left = volume[minZ,minY:maxY+1,minX:maxX+1]

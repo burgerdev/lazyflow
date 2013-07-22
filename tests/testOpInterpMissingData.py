@@ -240,8 +240,8 @@ class TestInterpolation(unittest.TestCase):
     
     def testCubicAlgorithm(self):
         (v,m,orig) = _singleMissingLayer(layer=15, nx=1,ny=1,nz=50,method='cubic')
-        v[:,:,10:15] = 0
-        m[:,:,10:15] = 1
+        v[:,:,10] = 0
+        m[:,:,10] = 1
         interpolationMethod = 'cubic'
         self.op.InputVolume.setValue(v)
         self.op.Missing.setValue(m)
@@ -261,11 +261,11 @@ class TestInterpolation(unittest.TestCase):
         (i,j,k) = np.where(m==0)
         xs = x[i,j,k]
         ys = v.view(np.ndarray)[i,j,k]
-        spline = UnivariateSpline(x[:,:,[8, 9, 16, 17]], v[:,:,[8,9,16,17]], k=3, s=0)
+        spline = UnivariateSpline(x[:,:,[8, 9, 11, 12]], v[:,:,[8,9,11,12]], k=3, s=0)
         e = spline(np.arange(v.shape[2]))
         
-        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10:15].squeeze().view(np.ndarray),\
-                                e[10:15], decimal=3, err_msg="scipy.interpolate.UnivariateSpline comparison")
+        assert_array_almost_equal(self.op.Output[:].wait()[:,:,10].squeeze().view(np.ndarray),\
+                                e[10], decimal=3, err_msg="scipy.interpolate.UnivariateSpline comparison")
                             
                                 
     def test4D(self):
@@ -441,7 +441,7 @@ class TestInterpMissingData(unittest.TestCase):
         
     def testRoi(self):
         nz = 30
-        interpolationMethod = 'cubic'
+        interpolationMethod = 'linear'
         self.op.InterpolationMethod.setValue(interpolationMethod)
         (vol, _, exp) = _singleMissingLayer(layer=nz,method=interpolationMethod)
         (vol2,_,_) = _singleMissingLayer(layer=nz+1,method=interpolationMethod)
