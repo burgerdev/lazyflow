@@ -1,6 +1,8 @@
 import logging
 from functools import partial
 import cPickle as pickle
+import tempfile
+
 
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.operators.adaptors import Op5ifyer
@@ -637,9 +639,10 @@ class OpDetectMissing(Operator):
     
     
     
-    ### PRIVATE ###
+    ### PRIVATE class attributes ###
     _manager = SVMManager()
     _inputRange = (0,255)
+    _needsTraining = True
     
     
     def __init__(self, *args, **kwargs):
@@ -649,7 +652,12 @@ class OpDetectMissing(Operator):
     def propagateDirty(self, slot, subindex, roi):
         if slot == self.InputVolume:
             self.Output.setDirty(roi)
-    
+        if slot == self.TrainingHistograms:
+            OpDetectMissing._needsTraining = True
+            
+        if slot == self.NHistogramBins:
+            OpDetectMissing._needsTraining = OpDetectMissing._manager.has(self.NHistogramBins.value)
+        
     
     def setupOutputs(self):
         self.Output.meta.assignFrom( self.InputVolume.meta )
@@ -696,6 +704,7 @@ class OpDetectMissing(Operator):
     @staticmethod
     def loads(s):
         OpDetectMissing._manager.overload(pickle.loads(s))
+        OpDetectMissing._needsTraining = OpDetectMissing._manager.has(self.NHistogramBins.value)
     
 
     def _detectMissing(self, slot, data):
@@ -712,7 +721,8 @@ class OpDetectMissing(Operator):
             and len(data.shape) == 3, \
             "Data must be 3d with axis 'zyx'."
         
-        self._train(force=False)
+        if not OpDetectMissing._manager.has(self.NHistogramBins.value):
+            self._train()
         
         result = vigra.VigraArray(data)*0
         
@@ -759,9 +769,10 @@ class OpDetectMissing(Operator):
         (retrains only if bin size is currently untrained or force is True)
         '''
         
+        #FIXME unneccessary force input        
         
         # return early if unneccessary
-        if not force and OpDetectMissing._manager.has(self.NHistogramBins.value):
+        if not OpDetectMissing._needsTraining and OpDetectMissing._manager.has(self.NHistogramBins.value):
             return
         
         logger.debug("Training for {} histogram bins ...".format(self.NHistogramBins.value))
@@ -771,6 +782,8 @@ class OpDetectMissing(Operator):
             return
         
         histograms = self.TrainingHistograms[:].wait()
+        
+        logger.debug("Finished loading histogram data of shape {}.".format(histograms.shape))
         
         assert histograms.shape[1] == self.NHistogramBins.value+1 and \
             len(histograms.shape) == 2, \
@@ -789,16 +802,20 @@ class OpDetectMissing(Operator):
 
         #prepare for 10-fold cross-validation
         nfolds = 10
+        cfp = np.zeros((nfolds,))
+        cfn = np.zeros((nfolds,))
+        cprec = np.zeros((nfolds,))
+        crec = np.zeros((nfolds,))
         pos_random = np.random.permutation(len(pos))
         neg_random = np.random.permutation(len(neg))
 
-        with open("/tmp/crossvalidation.txt", "w") as templogfile:
+        with tempfile.NamedTemporaryFile(suffix='.txt', prefix='crossvalidation_', delete=False) as templogfile:
             for i in range(nfolds):
                 logger.debug("starting cross validation fold {}".format(i))
                 
                 # partition the set in training and test data, use i-th for testing
                 posTest=pos[pos_random[i*npos/nfolds:(i+1)*npos/nfolds],:]
-                posTrain = np.vstack((pos[pos_random[0:npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
+                posTrain = np.vstack((pos[pos_random[0:i*npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
                 
                 negTest=neg[neg_random[i*nneg/nfolds:(i+1)*nneg/nfolds],:]
                 negTrain = np.vstack((neg[neg_random[0:i*nneg/nfolds],:], neg[neg_random[(i+1)*nneg/nfolds:],:]))
@@ -815,12 +832,24 @@ class OpDetectMissing(Operator):
                 predPos = self._predict(posTest)
 
             
-                fp = (predNeg.sum())/float(predNeg.size)
-                fn = (predPos.size - predPos.sum())/float(predPos.size)
-                prec = predPos.sum()/float(predPos.sum()+predNeg.sum())
+                fp = (predNeg.sum())/float(predNeg.size); cfp[i] = fp
+                fn = (predPos.size - predPos.sum())/float(predPos.size); cfn[i] = fn
+                
+                prec = predPos.sum()/float(predPos.sum()+predNeg.sum()); cprec[i] = prec
+                recall = 1-fn; crec[i] = recall
             
-                logger.info(" Finished training. Results of cross validation: FPR %.5f, FNR %.5f (recall %.5f, precision: %.5f)." % (fp, fn, 1-fn, prec))
+                logger.debug(" Finished training. Results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
                 templogfile.write(str(fp)+" "+str(fn)+" "+str(1-fn)+" "+str(prec)+"\n")
+            
+            fp = np.mean(cfp)
+            fn = np.mean(cfn)
+            recall = np.mean(crec)
+            prec = np.mean(cprec)
+            logger.info(" Finished training. Averaged results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
+            logger.info(" Wrote training results to '{}'.".format(templogfile.name))
+        
+        OpDetectMissing._needsTraining = False
+            
         
             
     def _felzenszwalbTraining(self, negative, positive):
@@ -972,7 +1001,6 @@ class OpDetectMissing(Operator):
 
 if __name__ == "__main__":
     
-    import tempfile
     import argparse
     import os.path
     
@@ -992,7 +1020,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     patchSize = int(args.patchSize)
     haloSize = int(args.haloSize)
-    binSize = int(args.haloSize)
+    binSize = int(args.binSize)
     
     logging.basicConfig()
     logger.setLevel(logging.DEBUG)
@@ -1009,14 +1037,12 @@ if __name__ == "__main__":
         histograms = extractHistograms(volume, labels, patchSize = patchSize+haloSize, nBins=binSize, intRange=(0,255))
         
         if args.histfile is not None:
-            with open(args.histfile, 'w') as f:
-                pickle.dump(histograms, f)
-                logger.debug("Dumped training data to {}.".format(args.histfile))
+            vigra.impex.writeHDF5(histograms, args.histfile, '/volume/data')
+            logger.debug("Dumped training data with shape {} to '{}'.".format(histograms.shape, args.histfile))
         
     else:
-        with open(args.histfile) as f:
-            histograms = pickle.load(f)
-            logger.debug("Loaded training data from {}.".format(args.histfile))
+        histograms = vigra.impex.readHDF5(args.histfile, '/volume/data')
+        logger.debug("Loaded training data from '{}'.".format(args.histfile))
     
     
     
