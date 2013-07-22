@@ -696,13 +696,11 @@ class OpDetectMissing(Operator):
         return result
     
     
-    @staticmethod
-    def dumps():
+    def dumps(self):
         return pickle.dumps(OpDetectMissing._manager.extract())
     
     
-    @staticmethod
-    def loads(s):
+    def loads(self, s):
         OpDetectMissing._manager.overload(pickle.loads(s))
         OpDetectMissing._needsTraining = OpDetectMissing._manager.has(self.NHistogramBins.value)
     

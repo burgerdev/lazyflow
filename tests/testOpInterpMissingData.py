@@ -27,7 +27,8 @@ _testDescriptions = ['large block empty', 'single layer empty', 'last layer empt
 def _getTestVolume(description, method):
     
     if description == 'large block empty':
-        expected_output = _volume(nz=100, method=method)
+        #expected_output = _volume(nz=100, method=method)
+        expected_output = _volume(nz=100, method='linear' if not method == 'constant' else 'constant')
         volume = vigra.VigraArray(expected_output)
         missing = vigra.VigraArray(expected_output, dtype=np.uint8)
         volume[:,:,30:50] = 0
@@ -57,7 +58,7 @@ def _getTestVolume(description, method):
         # expect constant interpolation at border
         expected_output[...,0:10] = volume[...,10].withAxes(*'xyz')
     elif description == 'multiple blocks empty':
-        expected_output = _volume(method=method)
+        expected_output = _volume(method='linear' if not method == 'constant' else 'constant')
         volume = vigra.VigraArray(expected_output)
         missing = vigra.VigraArray(expected_output, dtype=np.uint8)
         volume[:,:,[10,11,30,31]] = 0
@@ -231,7 +232,6 @@ class TestInterpolation(unittest.TestCase):
         self.op.InputVolume.setValue(v)
         self.op.Missing.setValue(m)
         self.op.InterpolationMethod.setValue(interpolationMethod)
-        self.op.InputVolume.setValue( v )
         
         assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray),\
                                 orig.view(np.ndarray), decimal=3,\
@@ -246,7 +246,6 @@ class TestInterpolation(unittest.TestCase):
         self.op.InputVolume.setValue(v)
         self.op.Missing.setValue(m)
         self.op.InterpolationMethod.setValue(interpolationMethod)
-        self.op.InputVolume.setValue( v )
         
         # natural comparison
         assert_array_almost_equal(self.op.Output[:].wait().view(np.ndarray),\
