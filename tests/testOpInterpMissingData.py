@@ -211,6 +211,34 @@ class TestDetection(unittest.TestCase):
     def testPersistence(self):
         dumpedString = self.op.dumps()
         self.op.loads(dumpedString)
+        
+    def testPatchify(self):
+        from lazyflow.operators.opInterpMissingData import _patchify as patchify
+        
+        X = np.vander(np.arange(2,5))
+        (patches,slices) = patchify(X,1,1)
+        
+        expected = [np.array([[4,2],[9,3]]), \
+                    np.array([[4,2,1],[9,3,1]]), \
+                    np.array([[2,1],[3,1]]), \
+                    np.array([[4,2],[9,3],[16,4]]), \
+                    np.array([[4,2,1],[9,3,1],[16,4,1]]), \
+                    np.array([[2,1],[3,1],[4,1]]), \
+                    np.array([[9,3],[16,4]]), \
+                    np.array([[9,3,1],[16,4,1]]), \
+                    np.array([[3,1],[4,1]])]
+                
+        for ep in expected:
+            has = False
+            for p in patches:
+                if np.all(p == ep):
+                    has = True
+            
+            assert has, "Mising patch {}".format(ep)
+        
+        # FIXME missing slice comparison
+                    
+        
     
 class TestInterpolation(unittest.TestCase):
     '''

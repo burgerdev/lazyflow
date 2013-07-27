@@ -60,6 +60,7 @@ class OpInterpMissingData(Operator):
         self.detector.PatchSize.connect(self.PatchSize)
         self.detector.HaloSize.connect(self.HaloSize)
         self.detector.DetectionMethod.connect(self.DetectionMethod)
+        self.detector.OverloadDetector.connect(self.OverloadDetector)
         
         self.interpolator.InputVolume.connect(self.InputVolume)
         self.interpolator.Missing.connect(self.detector.Output) 
@@ -151,8 +152,6 @@ class OpInterpMissingData(Operator):
             self.Output.setDirty(roi)
         
         if slot == self.OverloadDetector:
-            s = self.OverloadDetector.value
-            self.loads(s)
             self._dirty = True
         
         if slot == self.TrainDetector:
@@ -649,6 +648,7 @@ class OpDetectMissing(Operator):
     HaloSize = InputSlot(value=30)
     DetectionMethod = InputSlot(value='classic')
     NHistogramBins = InputSlot(value=_defaultBinSize)
+    OverloadDetector = InputSlot(value='')
     
     #histograms: ndarray, shape: nHistograms x (NHistogramBins.value + 1)
     # the last column holds the label, i.e. {0: negative, 1: positive}
@@ -663,6 +663,7 @@ class OpDetectMissing(Operator):
     _manager = SVMManager()
     _inputRange = (0,255)
     _needsTraining = True
+    _doCrossValidation = False
     
     
     def __init__(self, *args, **kwargs):
@@ -677,6 +678,14 @@ class OpDetectMissing(Operator):
             
         if slot == self.NHistogramBins:
             OpDetectMissing._needsTraining = OpDetectMissing._manager.has(self.NHistogramBins.value)
+            
+        if slot == self.PatchSize or slot == self.HaloSize:
+            self.Output.setDirty()
+            
+        if slot == self.OverloadDetector:
+            s = self.OverloadDetector.value
+            self.loads(s)
+            self.Output.setDirty()
         
     
     def setupOutputs(self):
@@ -738,9 +747,6 @@ class OpDetectMissing(Operator):
             and data.axistags.index('x') == 2 \
             and len(data.shape) == 3, \
             "Data must be 3d with axis 'zyx'."
-        
-        if not OpDetectMissing._manager.has(self.NHistogramBins.value):
-            self.train()
         
         result = vigra.VigraArray(data)*0
         
@@ -824,46 +830,51 @@ class OpDetectMissing(Operator):
         crec = np.zeros((nfolds,))
         pos_random = np.random.permutation(len(pos))
         neg_random = np.random.permutation(len(neg))
-
-        with tempfile.NamedTemporaryFile(suffix='.txt', prefix='crossvalidation_', delete=False) as templogfile:
-            for i in range(nfolds):
-                logger.debug("starting cross validation fold {}".format(i))
-                
-                # partition the set in training and test data, use i-th for testing
-                posTest=pos[pos_random[i*npos/nfolds:(i+1)*npos/nfolds],:]
-                posTrain = np.vstack((pos[pos_random[0:i*npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
-                
-                negTest=neg[neg_random[i*nneg/nfolds:(i+1)*nneg/nfolds],:]
-                negTrain = np.vstack((neg[neg_random[0:i*nneg/nfolds],:], neg[neg_random[(i+1)*nneg/nfolds:],:]))
-                
-                logger.debug("positive training shape {}, negative training shape {}, positive testing shape {}, negative testing shape {}".format(posTrain.shape, negTrain.shape, posTest.shape, negTest.shape))
-
-                #FIXME do we need a minimum training set size??
-                
-                logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(neg), len(pos)))
-                self._felzenszwalbTraining(negTrain, posTrain)
-            
-
-                predNeg = self._predict(negTest)
-                predPos = self._predict(posTest)
-
-            
-                fp = (predNeg.sum())/float(predNeg.size); cfp[i] = fp
-                fn = (predPos.size - predPos.sum())/float(predPos.size); cfn[i] = fn
-                
-                prec = predPos.sum()/float(predPos.sum()+predNeg.sum()); cprec[i] = prec
-                recall = 1-fn; crec[i] = recall
-            
-                logger.debug(" Finished training. Results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
-                templogfile.write(str(fp)+" "+str(fn)+" "+str(1-fn)+" "+str(prec)+"\n")
-            
-            fp = np.mean(cfp)
-            fn = np.mean(cfn)
-            recall = np.mean(crec)
-            prec = np.mean(cprec)
-            logger.info(" Finished training. Averaged results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
-            logger.info(" Wrote training results to '{}'.".format(templogfile.name))
         
+        if self._doCrossValidation:
+            with tempfile.NamedTemporaryFile(suffix='.txt', prefix='crossvalidation_', delete=False) as templogfile:
+                for i in range(nfolds):
+                    logger.debug("starting cross validation fold {}".format(i))
+                    
+                    # partition the set in training and test data, use i-th for testing
+                    posTest=pos[pos_random[i*npos/nfolds:(i+1)*npos/nfolds],:]
+                    posTrain = np.vstack((pos[pos_random[0:i*npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
+                    
+                    negTest=neg[neg_random[i*nneg/nfolds:(i+1)*nneg/nfolds],:]
+                    negTrain = np.vstack((neg[neg_random[0:i*nneg/nfolds],:], neg[neg_random[(i+1)*nneg/nfolds:],:]))
+                    
+                    logger.debug("positive training shape {}, negative training shape {}, positive testing shape {}, negative testing shape {}".format(posTrain.shape, negTrain.shape, posTest.shape, negTest.shape))
+
+                    #FIXME do we need a minimum training set size??
+                    
+                    logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(negTrain), len(posTrain)))
+                    self._felzenszwalbTraining(negTrain, posTrain)
+                
+
+                    predNeg = self._predict(negTest)
+                    predPos = self._predict(posTest)
+
+                
+                    fp = (predNeg.sum())/float(predNeg.size); cfp[i] = fp
+                    fn = (predPos.size - predPos.sum())/float(predPos.size); cfn[i] = fn
+                    
+                    prec = predPos.sum()/float(predPos.sum()+predNeg.sum()); cprec[i] = prec
+                    recall = 1-fn; crec[i] = recall
+                
+                    logger.debug(" Finished training. Results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
+                    templogfile.write(str(fp)+" "+str(fn)+" "+str(1-fn)+" "+str(prec)+"\n")
+                
+                fp = np.mean(cfp)
+                fn = np.mean(cfn)
+                recall = np.mean(crec)
+                prec = np.mean(cprec)
+                logger.info(" Finished training. Averaged results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
+                logger.info(" Wrote training results to '{}'.".format(templogfile.name))
+        else:
+            logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(neg), len(pos)))
+            self._felzenszwalbTraining(neg, pos)
+            logger.debug("Finished training.")
+            
         OpDetectMissing._needsTraining = False
             
         
