@@ -115,7 +115,8 @@ class TestDetection(unittest.TestCase):
         self.op = OpDetectMissing(graph=Graph())
         self.op.PatchSize.setValue(64)
         self.op.HaloSize.setValue(0)
-        #self.op.DetectionMethod.setValue('svm')
+        self.op.DetectionMethod.setValue('svm')
+        self.op.train(force=True)
         
     def testClassicDetection(self):
         self.op.DetectionMethod.setValue('classic')
@@ -377,6 +378,7 @@ class TestInterpMissingData(unittest.TestCase):
     def setUp(self):
         g=Graph()
         op = OpInterpMissingData(graph = g)
+        op.detector.train(force=True)
         self.op = op
     
     def testDetectorPropagation(self):

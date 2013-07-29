@@ -9,6 +9,7 @@ from lazyflow.operators.adaptors import Op5ifyer
 from lazyflow.stype import Opaque
 from lazyflow.rtype import SubRegion
 from lazyflow.request import Request, RequestPool
+from lazyflow.roi import roiToSlice
 
 import numpy as np
 import numpy as np
@@ -110,13 +111,8 @@ class OpInterpMissingData(Operator):
         
         assert method in self._requiredMargin.keys(), "Unknown interpolation method {}".format(method)
         
-        def roi2slice(roi):
-            out = []
-            for start, stop in zip(roi.start, roi.stop):
-                out.append(slice(start, stop))
-            return tuple(out)
 
-        
+        # keep a backup of the original roi
         oldStart = np.asarray([k for k in roi.start])
         oldStop = np.asarray([k for k in roi.stop])
 
@@ -138,7 +134,7 @@ class OpInterpMissingData(Operator):
         roi.start *= 0
         roi.start[z_index] += z_offsets[0]
         roi.stop[z_index] -= z_offsets[1]
-        key = roi2slice(roi)
+        key = roiToSlice(roi.start, roi.stop)
         
         result[:] = a[key]
         
@@ -542,7 +538,7 @@ class SVMManager(object):
         try:
             return self._svms[n]
         except KeyError:
-            raise NotTrainedError("Detector for bin size {} not trained.".format(n))
+            raise NotTrainedError("Detector for bin size {} not trained.\nHave {}.".format(n, self._svms))
     
     def add(self, svm, n, overwrite=False):
         if not n in self._svms.keys() or overwrite:
@@ -793,10 +789,12 @@ class OpDetectMissing(Operator):
         (retrains only if bin size is currently untrained or force is True)
         '''
         
+        #always train!
+        '''
         # return early if unneccessary
         if not force and not OpDetectMissing._needsTraining and OpDetectMissing._manager.has(self.NHistogramBins.value):
             return
-        
+        '''
         logger.debug("Training for {} histogram bins ...".format(self.NHistogramBins.value))
         
         if self.DetectionMethod.value == 'classic' or not havesklearn:
@@ -973,7 +971,7 @@ class OpDetectMissing(Operator):
         
         logger.debug(" Finished Felzenszwalb Training.")
     
-    
+    #FIXME make this @classmethod
     def _fit(self, negative, positive):
         '''
         train the underlying SVM
@@ -985,13 +983,14 @@ class OpDetectMissing(Operator):
         labels = [0]*len(negative) + [1]*len(positive)
         samples = np.vstack( (negative,positive) )
         
-        svm = SVC(C=1000, kernel=_histogramIntersectionKernel)
+        #TODO explicit passing of scale_C suppresses a warning, but has no other apparent reason
+        svm = SVC(C=1000, kernel=_histogramIntersectionKernel, scale_C=True)
         
         svm.fit(samples, labels)
         
         OpDetectMissing._manager.add(svm, self.NHistogramBins.value, overwrite=True)
         
-        
+    #FIXME make this @classmethod
     def _predict(self, X):
         '''
         predict if the histograms in X correspond to missing regions
