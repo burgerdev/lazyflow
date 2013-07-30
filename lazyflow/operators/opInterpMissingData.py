@@ -502,6 +502,8 @@ class OpInterpolate(Operator):
 try:
     from sklearn.svm import SVC
     havesklearn = True
+    from sklearn import __version__ as sklearnVersion
+    svcTakesScaleC = int(sklearnVersion.split('.')[1]) < 11
 except ImportError:
     logger.warning("Could not import dependency 'sklearn' for SVMs")
     havesklearn = False
@@ -533,7 +535,10 @@ class SVMManager(object):
     manages our SVMs for multiple bin numbers
     '''
     
-    _svms = {'version': 1}
+    _svms = None
+    
+    def __init__(self):
+        self._svms = {'version': 1}
     
     def get(self, n):
         try:
@@ -568,6 +573,9 @@ class SVMManager(object):
                         self.add(svm, n, overwrite=True)
             except KeyError:
                 raise ValueError("Format not recognized.")
+            
+    def __str__(self):
+        return str(self._svms)
 
 
 def _chooseRandomSubset(data, n):
@@ -680,6 +688,8 @@ class OpDetectMissing(Operator):
             self.Output.setDirty()
             
         if slot == self.OverloadDetector:
+            
+            print("AHA!!!")
             s = self.OverloadDetector.value
             self.loads(s)
             self.Output.setDirty()
@@ -720,15 +730,6 @@ class OpDetectMissing(Operator):
                 resultZYXCT[...,c,t] = self._detectMissing(slot, dataZYXCT[...,c,t])
 
         return result
-    
-    
-    def dumps(self):
-        return pickle.dumps(OpDetectMissing._manager.extract())
-    
-    
-    def loads(self, s):
-        OpDetectMissing._manager.overload(pickle.loads(s))
-        OpDetectMissing._needsTraining = OpDetectMissing._manager.has(self.NHistogramBins.value)
     
 
     def _detectMissing(self, slot, data):
@@ -773,8 +774,9 @@ class OpDetectMissing(Operator):
             for patch in patches:
                 (hist, _) = np.histogram(patch, bins=self.NHistogramBins.value, range=self._inputRange, density=True)
                 hists.append(hist)
+            hists = np.vstack(hists)
             
-            pred = self._predict(hists)
+            pred = self.predict(hists, method=self.DetectionMethod.value)
             
             for i, p in enumerate(pred):
                 if p > 0: 
@@ -848,8 +850,8 @@ class OpDetectMissing(Operator):
                     self._felzenszwalbTraining(negTrain, posTrain)
                 
 
-                    predNeg = self._predict(negTest)
-                    predPos = self._predict(posTest)
+                    predNeg = self.predict(negTest, method=self.DetectionMethod.value)
+                    predPos = self.predict(posTest, method=self.DetectionMethod.value)
 
                 
                     fp = (predNeg.sum())/float(predNeg.size); cfp[i] = fp
@@ -885,6 +887,7 @@ class OpDetectMissing(Operator):
         #TODO sanity checks
         
         n = (self.PatchSize.value + self.HaloSize.value)**2
+        method = self.DetectionMethod.value
         
         #FIXME arbitrary
         firstSamples = 200
@@ -908,7 +911,7 @@ class OpDetectMissing(Operator):
         def felzenstep(x, cache, ind):
             
             case = ("positive" if ind>0 else "negative") + " set"
-            pred = self._predict(x)
+            pred = self.predict(x, method=method)
             
             hard = np.where(pred != ind)[0]
             easy = np.setdiff1d(range(len(x)), hard)
@@ -951,7 +954,7 @@ class OpDetectMissing(Operator):
         for k in range(nTrainingSteps): #just count iterations
 
             logger.debug("Felzenszwalb Training (step {}/{}): {} hard negative samples, {} hard positive samples.".format(k+1,nTrainingSteps, len(S_t[0]), len(S_t[1])))
-            self._fit(S_t[0], S_t[1])
+            self.fit(S_t[0], S_t[1], method=method)
             
             pool = RequestPool()
 
@@ -966,41 +969,59 @@ class OpDetectMissing(Operator):
                 #already have all hard examples in training set
                 break
 
-        self._fit(S_t[0], S_t[1])
+        self.fit(S_t[0], S_t[1], method=method)
         
         logger.debug(" Finished Felzenszwalb Training.")
+        
+        
+    #####################
+    ### CLASS METHODS ###
+    #####################
     
-    #FIXME make this @classmethod
-    def _fit(self, negative, positive):
+    @classmethod
+    def fit(cls, negative, positive, method='classic'):
         '''
         train the underlying SVM
         '''
         
-        if self.DetectionMethod.value == 'classic' or not havesklearn:
+        if method == 'classic' or not havesklearn:
             return
+        
+        assert len(negative.shape) == 2, "Negative training set must have shape (nSamples, nHistogramBins)."
+        assert len(positive.shape) == 2, "Positive training set must have shape (nSamples, nHistogramBins)."
+        
+        assert negative.shape[1] == positive.shape[1], "Negative and positive histograms must have the same number of bins."
+        nBins = negative.shape[1]
         
         labels = [0]*len(negative) + [1]*len(positive)
         samples = np.vstack( (negative,positive) )
         
-        #TODO explicit passing of scale_C suppresses a warning, but has no other well-informed reason
-        svm = SVC(C=1000, kernel=_histogramIntersectionKernel, scale_C=True)
+        
+        if svcTakesScaleC:
+            # old scikit-learn versions take scale_C as a parameter, new ones don't and default to True
+            svm = SVC(C=1000, kernel=_histogramIntersectionKernel, scale_C=True)
+        else:
+            svm = SVC(C=1000, kernel=_histogramIntersectionKernel)
         
         svm.fit(samples, labels)
         
-        OpDetectMissing._manager.add(svm, self.NHistogramBins.value, overwrite=True)
+        cls._manager.add(svm, nBins, overwrite=True)
         
-    #FIXME make this @classmethod
-    def _predict(self, X):
+    @classmethod
+    def predict(cls, X, method='classic'):
         '''
         predict if the histograms in X correspond to missing regions
         do this for subsets of X in parallel
         '''
         
-        if self.DetectionMethod.value == 'classic' or not havesklearn:
+        assert len(X.shape) == 2, "Prediction data must have shape (nSamples, nHistogramBins)."
+        nBins = X.shape[1]
+        
+        if method == 'classic' or not havesklearn:
             svm = PseudoSVC()
         else:
-            svm = OpDetectMissing._manager.get(self.NHistogramBins.value)
-        
+            svm = cls._manager.get(nBins)
+            
         y = np.zeros((len(X),))*np.nan
         
         pool = RequestPool()
@@ -1020,9 +1041,32 @@ class OpDetectMissing(Operator):
         pool.wait()
         pool.clean()
         
-        assert not np.any(np.isnan(y))
+        # not neccessary
+        #assert not np.any(np.isnan(y))
         return np.asarray(y)
-
+    
+    
+    @classmethod
+    def has(cls, n):
+        print(cls._manager)
+        return cls._manager.has(n)
+    
+    
+    @classmethod
+    def reset(cls):
+        cls._manager = SVMManager()
+        print(cls._manager)
+    
+    
+    @classmethod
+    def dumps(cls):
+        return pickle.dumps(cls._manager.extract())
+    
+    @classmethod
+    def loads(cls, s):
+        print("Loading {}".format(pickle.loads(s)))
+        OpDetectMissing._manager.overload(pickle.loads(s))
+        
 
 if __name__ == "__main__":
     
