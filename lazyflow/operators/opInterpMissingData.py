@@ -91,6 +91,7 @@ class OpInterpMissingData(Operator):
         taggedShape = self.InputVolume.meta.getTaggedShape()
         
         # this assumption is important!
+        #FIXME why??
         if 't' in taggedShape:
             assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
         if 'c' in taggedShape:
@@ -789,12 +790,10 @@ class OpDetectMissing(Operator):
         (retrains only if bin size is currently untrained or force is True)
         '''
         
-        #always train!
-        '''
         # return early if unneccessary
         if not force and not OpDetectMissing._needsTraining and OpDetectMissing._manager.has(self.NHistogramBins.value):
             return
-        '''
+        
         logger.debug("Training for {} histogram bins ...".format(self.NHistogramBins.value))
         
         if self.DetectionMethod.value == 'classic' or not havesklearn:
@@ -983,7 +982,7 @@ class OpDetectMissing(Operator):
         labels = [0]*len(negative) + [1]*len(positive)
         samples = np.vstack( (negative,positive) )
         
-        #TODO explicit passing of scale_C suppresses a warning, but has no other apparent reason
+        #TODO explicit passing of scale_C suppresses a warning, but has no other well-informed reason
         svm = SVC(C=1000, kernel=_histogramIntersectionKernel, scale_C=True)
         
         svm.fit(samples, labels)

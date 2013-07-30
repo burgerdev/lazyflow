@@ -384,14 +384,14 @@ class TestInterpMissingData(unittest.TestCase):
     def testDetectorPropagation(self):
         (volume, _, expected) = _getTestVolume(_testDescriptions[0], 'linear')
         self.op.InputVolume.setValue(volume)
-        _ = self.op.Output[:].wait()
+        self.op.detector.train()
         s = self.op.Detector[:].wait()
         
         g=Graph()
         op2 = OpInterpMissingData(graph = g)
-        op2.InputVolume.setValue(volume)
+
         op2.OverloadDetector.setValue(s)
-        
+        #FIXME use the class method here!!!
         assert op2.detector._manager.has(op2.detector.NHistogramBins.value)
         
     
