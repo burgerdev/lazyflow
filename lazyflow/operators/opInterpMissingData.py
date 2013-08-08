@@ -1125,165 +1125,205 @@ if __name__ == "__main__":
     import argparse
     import os.path
     from sys import exit
+    import time
     
     from lazyflow.graph import Graph
     
     from lazyflow.operators.opInterpMissingData import _histogramIntersectionKernel, PseudoSVC
     
+    logging.basicConfig()
+    logger.setLevel(logging.INFO)
+    
+    
+    # BEGIN ARGPARSE
+    
     parser = argparse.ArgumentParser(description='Train a missing slice detector')
     
-    parser.add_argument('file', nargs='*', action='store', help="volume and labels (if omitted, '-f' must be given)")
+    parser.add_argument('file', nargs='*', action='store', \
+        help="volume and labels (if omitted, the working directory must contain histogram files)")
     
-    parser.add_argument('-f', '--histograms', dest='histograms', action='store', default=None,\
-        help='HDF5 file with histograms (if not existing, histograms get calculated from volume and label files and stored there)')
+    parser.add_argument('-d', '--directory', dest='directory', action='store', default="/tmp",\
+        help='working directory, histograms and detector file will be stored there')
     
-    parser.add_argument('-c', '--testing-range', dest='testingrange', action='store', default=None,\
+    parser.add_argument('-t', '--testingrange', dest='testingrange', action='store', default=None,\
         help='the z range of the labels that are for testing (like "0-3,11,17-19" which would evaluate to [0,1,2,3,11,17,18,19])')
     
-    parser.add_argument('-d', dest='detfile', action='store', default=None, help='Output file for pickled detector (will be a temporary file if omitted)')
+    parser.add_argument('-f', '--force', dest='force', action='store_true', default=False, \
+        help='force extraction of histograms, even if the directory already contains histograms')
     
-    parser.add_argument('--patch', dest='patchSize', action='store', default='64', help='patch size')
-    parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size')
-    parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins')
-    
+    parser.add_argument('--patch', dest='patchSize', action='store', default='64', help='patch size (e.g.: "32,64-128")')
+    parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size (e.g.: "32,64-128")')
+    parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins (e.g.: "10-15,20")')
     
     args = parser.parse_args()
-    patchSize = int(args.patchSize)
-    haloSize = int(args.haloSize)
-    binSize = int(args.binSize)
     
-    logging.basicConfig()
-    logger.setLevel(logging.DEBUG)
+    # END ARGPARSE
     
-    startFromLabels = (args.histograms is None or not os.path.exists(args.histograms) ) 
-                
-    if args.testingrange is not None:
-        singleRanges = args.testingrange.split(',')
-        expandedRanges = []
-        for r in singleRanges:
-            r2 = r.split('-')
-            if len(r2)==1:
-                expandedRanges.append(int(r))
-            elif len(r2) == 2:
-                for i in range(int(r2[0]),int(r2[1])+1): expandedRanges.append(i)
-            else:
-                logger.error("Syntax Error: '{}'".format(r))
-                exit(33)
-        testrange = np.asarray(expandedRanges)
-    else:
-        testrange = np.zeros((0,))
-        
-                
-    if startFromLabels:
-        logger.debug("Gathering histograms from labels...")
-        assert len(args.file) == 2, "If there are no histograms available, volume and labels must be provided."
-        logger.debug("Computing histograms (this could take a while)...")
-        
-        locs = ['/volume/data', '/cube']
-        
-        volume = None
-        labels = None
-        
-        for l in locs:
-            try:
-                volume = vigra.impex.readHDF5(args.file[0], l).withAxes(*'zyx')
-                break
-            except KeyError:
-                pass
-        if volume is None:
-            print("Could not find a volume in {} with paths {}".format(args.file[0], locs))
-            exit(42)
-            
-        for l in locs:
-            try:
-                labels = vigra.impex.readHDF5(args.file[1], '/volume/data').withAxes(*'zyx')
-                break
-            except KeyError:
-                pass
-        if labels is None:
-            print("Could not find a volume in {} with paths {}".format(args.file[1], locs))
-            exit(43)
-        
-        # bear with me, complicated axistags stuff is for my old vigra to work
-        trainrange = np.setdiff1d(np.arange(volume.shape[0]), testrange)
-        
-        trainData = vigra.taggedView(volume[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-        trainLabels = vigra.taggedView(labels[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-        
-        trainHistograms = extractHistograms(trainData, trainLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255))
-        
-        if len(testrange)>0:
-            testData = vigra.taggedView(volume[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-            testLabels = vigra.taggedView(labels[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-            
-            testHistograms = extractHistograms(testData, testLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255))
+    # BEGIN FILESYSTEM
+    
+    workingdir = args.directory
+    assert os.path.isdir(workingdir), "Directory '{}' does not exist.".format(workingdir)
+    for f in args.file: assert os.path.isfile(f), "'{}' does not exist.".format(f)
+    
+    # END FILESYSTEM
+    
+    # BEGIN NORMALIZE
+    
+    def _expand(rangelist):
+        if rangelist is not None:
+            singleRanges = rangelist.split(',')
+            expandedRanges = []
+            for r in singleRanges:
+                r2 = r.split('-')
+                if len(r2)==1:
+                    expandedRanges.append(int(r))
+                elif len(r2) == 2:
+                    for i in range(int(r2[0]),int(r2[1])+1): expandedRanges.append(i)
+                else:
+                    logger.error("Syntax Error: '{}'".format(r))
+                    exit(33)
+            return np.asarray(expandedRanges)
         else:
-            testHistograms = np.zeros((0,trainHistograms.shape[1]))
-        
-        
-        if args.histograms is not None:
-            vigra.impex.writeHDF5(trainHistograms, args.histograms, '/volume/train')
-            vigra.impex.writeHDF5(testHistograms, args.histograms, '/volume/test')
-            logger.debug("Dumped training data with shape {} to '{}'.".format(histograms.shape, args.histograms))
-        
-    else:
-        logger.debug("Gathering histograms from file...")
-        trainHistograms = vigra.impex.readHDF5(args.histograms, '/volume/train')
-        testHistograms =  vigra.impex.readHDF5(args.histograms, '/volume/test')
-        logger.debug("Loaded training data from '{}'.".format(args.histograms))
+            return np.zeros((0,))
     
+    testrange = _expand(args.testingrange)
     
+    patchSizes = _expand(args.patchSize)
+    haloSizes = _expand(args.haloSize)
+    binSizes = _expand(args.binSize)
     
-    logger.debug("Training...")
+    # END NORMALIZE
+    
     
     op = OpDetectMissing(graph=Graph())
+    
+    # iterate training conditions
+    for patchSize in patchSizes:
+        for haloSize in haloSizes:
+            for binSize in binSizes:
+                #FIXME optimize for already computed patch sizes ( (64,0) vs. (32,16) )
+                histfile = os.path.join(workingdir, "histograms_%d_%d_%d.h5" % (patchSize, haloSize, binSize))
+                detfile = os.path.join(workingdir, "detector_%d_%d_%d.pkl" % (patchSize, haloSize, binSize))
+                startFromLabels = args.force or not os.path.exists(histfile)
+                
+                # EXTRACT HISTOGRAMS
+                if startFromLabels:
+                    logger.info("Gathering histograms from {} patches (this could take a while) ...".format((patchSize, haloSize, binSize)))
+                    assert len(args.file) == 2, "If there are no histograms available, volume and labels must be provided."
+                    
+                    locs = ['/volume/data', '/cube']
+                    
+                    volume = None
+                    labels = None
+                    
+                    for l in locs:
+                        try:
+                            volume = vigra.impex.readHDF5(args.file[0], l).withAxes(*'zyx')
+                            break
+                        except KeyError:
+                            pass
+                    if volume is None:
+                        logger.error("Could not find a volume in {} with paths {}".format(args.file[0], locs))
+                        exit(42)
+                        
+                    for l in locs:
+                        try:
+                            labels = vigra.impex.readHDF5(args.file[1], '/volume/data').withAxes(*'zyx')
+                            break
+                        except KeyError:
+                            pass
+                    if labels is None:
+                        logger.error("Could not find a volume in {} with paths {}".format(args.file[1], locs))
+                        exit(43)
+                    
+                    # bear with me, complicated axistags stuff is for my old vigra to work
+                    trainrange = np.setdiff1d(np.arange(volume.shape[0]), testrange)
+                    
+                    trainData = vigra.taggedView(volume[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
+                    trainLabels = vigra.taggedView(labels[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
+                    
+                    trainHistograms = extractHistograms(trainData, trainLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255))
+                    
+                    if len(testrange)>0:
+                        testData = vigra.taggedView(volume[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
+                        testLabels = vigra.taggedView(labels[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
+                        
+                        testHistograms = extractHistograms(testData, testLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255))
+                    else:
+                        testHistograms = np.zeros((0,trainHistograms.shape[1]))
+                    
+                    
+                    vigra.impex.writeHDF5(trainHistograms, histfile, '/volume/train')
+                    if len(testHistograms)>0:
+                        vigra.impex.writeHDF5(testHistograms, histfile, '/volume/test')
+                    logger.info("Dumped histograms to '{}'.".format(histfile))
+                    
+                else:
+                    logger.info("Gathering histograms from file...")
+                    trainHistograms = vigra.impex.readHDF5(histfile, '/volume/train')
+                    try:
+                        testHistograms =  vigra.impex.readHDF5(histfile, '/volume/test')
+                    except KeyError:
+                        testHistograms = np.zeros((0,trainHistograms.shape[1]))
+                    logger.info("Loaded histograms from '{}'.".format(histfile))
+            
+            
+                # TRAIN
+            
+                logger.info("Training...")
+                
+                op.PatchSize.setValue(patchSize)
+                op.HaloSize.setValue(haloSize)
+                op.DetectionMethod.setValue('svm')
+                op.NHistogramBins.setValue(binSize)
+                
+                op.TrainingHistograms.setValue(trainHistograms)
+                
+                op.train(force=True)
+                
+                # save detector
+                try:
+                    if detfile is None:
+                        with tempfile.NamedTemporaryFile(suffix='.pkl', prefix='detector_', delete=False) as f:
+                            logger.info("Detector written to {}".format(f.name))
+                            f.write(op.dumps())
+                    else:
+                        with open(detfile,'w') as f:
+                            logger.info("Detector written to {}".format(f.name))
+                            f.write(op.dumps())
+                except Exception as e:
+                    print("==== BEGIN DETECTOR DUMP ====")
+                    print(op.dumps())
+                    print("==== END DETECTOR DUMP ====")
+                    logger.error(str(e))
+                    
+                
+                if len(testHistograms) == 0:
+                    # no testing required
+                    continue
+                
+                logger.info("Testing...")
+                
+                # split into histos and labels
+                hists = testHistograms[:,0:testHistograms.shape[1]-1]
+                labels = testHistograms[:,testHistograms.shape[1]-1]
+                
+                negTest = hists[np.where(labels==0)[0],...]
+                posTest = hists[np.where(labels==1)[0],...]
+                
+                predNeg = op.predict(negTest, method='svm')
+                predPos = op.predict(posTest, method='svm')
 
-    op.PatchSize.setValue(patchSize)
-    op.HaloSize.setValue(haloSize)
-    op.DetectionMethod.setValue('svm')
-    op.NHistogramBins.setValue(binSize)
-    
-    op.TrainingHistograms.setValue(trainHistograms)
-    
-    op.train(force=True)
-    
-    try:
-        if args.detfile is None:
-            with tempfile.NamedTemporaryFile(suffix='.pkl', prefix='detector_', delete=False) as f:
-                logger.debug("Detector written to {}".format(f.name))
-                f.write(op.dumps())
-        else:
-            with open(args.detfile,'w') as f:
-                logger.debug("Detector written to {}".format(f.name))
-                f.write(op.dumps())
-    except Exception as e:
-        print("==== BEGIN DETECTOR DUMP ====")
-        print(op.dumps())
-        print("==== END DETECTOR DUMP ====")
-        logger.error(str(e))
-    
-    if len(testHistograms) == 0:
-        exit(0)
-    
-    logger.debug("Testing...")
-    
-    # split into histos and labels
-    hists = testHistograms[:,0:testHistograms.shape[1]-1]
-    labels = testHistograms[:,testHistograms.shape[1]-1]
-    
-    negTest = hists[np.where(labels==0)[0],...]
-    posTest = hists[np.where(labels==1)[0],...]
-    
-    predNeg = op.predict(negTest, method='svm')
-    predPos = op.predict(posTest, method='svm')
+                fp = (predNeg.sum())/float(predNeg.size); 
+                fn = (predPos.size - predPos.sum())/float(predPos.size)
 
-    fp = (predNeg.sum())/float(predNeg.size); 
-    fn = (predPos.size - predPos.sum())/float(predPos.size)
-
-    prec = predPos.sum()/float(predPos.sum()+predNeg.sum())
-    recall = 1-fn
+                prec = predPos.sum()/float(predPos.sum()+predNeg.sum())
+                recall = 1-fn
+                
+                logger.info(" Predicted {} histograms with patchSize={}, haloSize={}, bins={}.".format(len(hists), patchSize, haloSize, binSize))
+                logger.info(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
+                
+                
     
-    logger.debug(" Predicted {} histograms.".format(len(hists)))
-    logger.debug(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
         
     
