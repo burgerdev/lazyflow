@@ -83,6 +83,7 @@ class OpInterpMissingData(Operator):
         # Output has the same shape/axes/dtype/drange as input
         self.Output.meta.assignFrom( self.InputVolume.meta )
 
+        '''
         # Check for errors
         taggedShape = self.InputVolume.meta.getTaggedShape()
         
@@ -92,7 +93,8 @@ class OpInterpMissingData(Operator):
             assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
         if 'c' in taggedShape:
             assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
-            
+        '''
+        
         self.Detector.meta.shape = (1,)
 
     def execute(self, slot, subindex, roi, result):
@@ -105,33 +107,64 @@ class OpInterpMissingData(Operator):
         
         assert method in self._requiredMargin.keys(), "Unknown interpolation method {}".format(method)
         
-
+        '''
         # keep a backup of the original roi
         oldStart = np.asarray([k for k in roi.start])
         oldStop = np.asarray([k for k in roi.stop])
-
+        '''
+        
+        
+        
         z_index = self.InputVolume.meta.axistags.index('z')
-        nz = self.InputVolume.meta.getTaggedShape()['z']
+        c_index = self.InputVolume.meta.axistags.index('c')
+        t_index = self.InputVolume.meta.axistags.index('t')
+        #nz = self.InputVolume.meta.getTaggedShape()['z']
         
-        # check if more input is needed, and how many
-        z_offsets = self._extendRoi(roi)
+        resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
         
+        # backup ROI
+        oldStart = np.copy(roi.start)
+        oldStop = np.copy(roi.stop)
         
-        # get extended interpolation
-        roi.start[z_index] -= z_offsets[0]
-        roi.stop[z_index] += z_offsets[1]
+        cRange = np.arange(roi.start[c_index],roi.stop[c_index]) if c_index<len(roi.start) \
+            else np.array([0])
+        tRange = np.arange(roi.start[t_index],roi.stop[t_index]) if t_index<len(roi.start) \
+            else np.array([0])
         
-        a = self.interpolator.Output.get(roi).wait()
+        for c in cRange:
+            for t in tRange:
+                
+                # change roi to single block
+                if c_index<len(roi.start):
+                    roi.start[c_index] = c
+                    roi.stop[c_index] = c+1
+                    
+                if t_index<len(roi.start):
+                    roi.start[t_index] = t
+                    roi.stop[t_index] = t+1
         
-        # reduce to original roi
-        roi.stop = roi.stop - roi.start
-        roi.start *= 0
-        roi.start[z_index] += z_offsets[0]
-        roi.stop[z_index] -= z_offsets[1]
-        key = roiToSlice(roi.start, roi.stop)
-        
-        result[:] = a[key]
-        
+                # check if more input is needed, and how many
+                z_offsets = self._extendRoi(roi)
+                
+                
+                # get extended interpolation
+                roi.start[z_index] -= z_offsets[0]
+                roi.stop[z_index] += z_offsets[1]
+                
+                a = self.interpolator.Output.get(roi).wait()
+                
+                # reduce to original roi
+                roi.stop = roi.stop - roi.start
+                roi.start *= 0
+                roi.start[z_index] += z_offsets[0]
+                roi.stop[z_index] -= z_offsets[1]
+                key = roiToSlice(roi.start, roi.stop)
+                
+                resultZYXCT[..., c,t] = vigra.taggedView(a[key], self.InputVolume.meta.axistags).withAxes(*'zyx')
+                
+                #restore ROI, will be used in other methods!!!
+                roi.start = np.copy(oldStart)
+                roi.stop = np.copy(oldStop)
         
         return result
     
@@ -397,8 +430,6 @@ class OpInterpolate(Operator):
                 maxLabel = missingLabeled.max()
                 for i in range(1,maxLabel+1):
                     self._interpolate(resultZYXCT[...,c,t], missingLabeled==i)
-        
-        
         
         return result
     
