@@ -712,6 +712,8 @@ class OpDetectMissing(Operator):
     _inputRange = (0,255)
     _needsTraining = True
     _doCrossValidation = False
+    _felzenOpts = {"firstSamples": 250, "maxRemovePerStep": 0, "maxAddPerStep": 250,\
+        "maxSamples": 1000, "nTrainingSteps": 4}
     
     
     def __init__(self, *args, **kwargs):
@@ -941,11 +943,11 @@ class OpDetectMissing(Operator):
         method = self.DetectionMethod.value
         
         #FIXME arbitrary
-        firstSamples = 250
-        maxRemovePerStep = 0
-        maxAddPerStep = 250
-        maxSamples = 1000
-        nTrainingSteps = 4
+        firstSamples = self._felzenOpts["firstSamples"]
+        maxRemovePerStep = self._felzenOpts["maxRemovePerStep"]
+        maxAddPerStep = self._felzenOpts["maxAddPerStep"]
+        maxSamples = self._felzenOpts["maxSamples"]
+        nTrainingSteps = self._felzenOpts["nTrainingSteps"]
         
         # initial choice of training samples
         (initNegative,choiceNegative, _, _) = _chooseRandomSubset(negative, min(firstSamples, len(negative)))
@@ -1126,6 +1128,7 @@ if __name__ == "__main__":
     import os.path
     from sys import exit
     import time
+    import csv
     
     from lazyflow.graph import Graph
     
@@ -1134,6 +1137,8 @@ if __name__ == "__main__":
     logging.basicConfig()
     logger.setLevel(logging.INFO)
     
+    
+    id = time.strftime("%Y-%m-%d_%H.%M")
     
     # BEGIN ARGPARSE
     
@@ -1155,6 +1160,10 @@ if __name__ == "__main__":
     parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size (e.g.: "32,64-128")')
     parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins (e.g.: "10-15,20")')
     
+    parser.add_argument('--opts', dest='opts', action='store', default='250,0,250,1000,4', \
+        help='<initial number of samples>,<maximum number of samples removed per step>,<maximum number of samples added per step>,'+ \
+            '<maximum number of samples>,<number of steps> (e.g. 250,0,250,1000,4)')
+    
     args = parser.parse_args()
     
     # END ARGPARSE
@@ -1164,6 +1173,10 @@ if __name__ == "__main__":
     workingdir = args.directory
     assert os.path.isdir(workingdir), "Directory '{}' does not exist.".format(workingdir)
     for f in args.file: assert os.path.isfile(f), "'{}' does not exist.".format(f)
+    
+    csvfile = open(os.path.join(workingdir, "%s_test_results.tsv" % (id,)), 'w')
+    csvwriter = csv.DictWriter(csvfile, fieldnames=("patch", "halo", "bins", "recall", "precision"), delimiter=' ', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    csvwriter.writeheader()
     
     # END FILESYSTEM
     
@@ -1181,6 +1194,7 @@ if __name__ == "__main__":
                     for i in range(int(r2[0]),int(r2[1])+1): expandedRanges.append(i)
                 else:
                     logger.error("Syntax Error: '{}'".format(r))
+                    csvfile.close()
                     exit(33)
             return np.asarray(expandedRanges)
         else:
@@ -1192,10 +1206,20 @@ if __name__ == "__main__":
     haloSizes = _expand(args.haloSize)
     binSizes = _expand(args.binSize)
     
+    try:
+        opts = [int(opt) for opt in args.opts.split(",")]
+        assert len(opts) == 5
+        opts = dict(zip(["firstSamples", "maxRemovePerStep", "maxAddPerStep",\
+            "maxSamples", "nTrainingSteps"], opts))
+    except:
+        raise ValueError("Cannot parse '--opts' argument '{}'".format(args.opts))
+    
     # END NORMALIZE
     
-    
+
     op = OpDetectMissing(graph=Graph())
+    
+    op._felzenOpts = opts
     
     # iterate training conditions
     for patchSize in patchSizes:
@@ -1203,7 +1227,7 @@ if __name__ == "__main__":
             for binSize in binSizes:
                 #FIXME optimize for already computed patch sizes ( (64,0) vs. (32,16) )
                 histfile = os.path.join(workingdir, "histograms_%d_%d_%d.h5" % (patchSize, haloSize, binSize))
-                detfile = os.path.join(workingdir, "detector_%d_%d_%d.pkl" % (patchSize, haloSize, binSize))
+                detfile = os.path.join(workingdir, "%s_detector_%d_%d_%d.pkl" % (id, patchSize, haloSize, binSize))
                 startFromLabels = args.force or not os.path.exists(histfile)
                 
                 # EXTRACT HISTOGRAMS
@@ -1224,6 +1248,7 @@ if __name__ == "__main__":
                             pass
                     if volume is None:
                         logger.error("Could not find a volume in {} with paths {}".format(args.file[0], locs))
+                        csvfile.close()
                         exit(42)
                         
                     for l in locs:
@@ -1234,6 +1259,7 @@ if __name__ == "__main__":
                             pass
                     if labels is None:
                         logger.error("Could not find a volume in {} with paths {}".format(args.file[1], locs))
+                        csvfile.close()
                         exit(43)
                     
                     # bear with me, complicated axistags stuff is for my old vigra to work
@@ -1322,8 +1348,9 @@ if __name__ == "__main__":
                 
                 logger.info(" Predicted {} histograms with patchSize={}, haloSize={}, bins={}.".format(len(hists), patchSize, haloSize, binSize))
                 logger.info(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
+                csvwriter.writerow({'patch': patchSize, 'halo': haloSize, 'bins': binSize, 'recall': recall, 'precision': prec})
                 
                 
     
-        
+    csvfile.close()
     
