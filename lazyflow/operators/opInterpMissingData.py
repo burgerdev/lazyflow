@@ -1221,6 +1221,8 @@ if __name__ == "__main__":
     
     op._felzenOpts = opts
     
+    logger.info("Starting training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+    
     # iterate training conditions
     for patchSize in patchSizes:
         for haloSize in haloSizes:
@@ -1349,8 +1351,7 @@ if __name__ == "__main__":
                 logger.info(" Predicted {} histograms with patchSize={}, haloSize={}, bins={}.".format(len(hists), patchSize, haloSize, binSize))
                 logger.info(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
                 csvwriter.writerow({'patch': patchSize, 'halo': haloSize, 'bins': binSize, 'recall': recall, 'precision': prec})
-                
-                
-    
+
+    logger.info("Finished training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
     csvfile.close()
     
