@@ -2,6 +2,7 @@ import logging
 from functools import partial
 import cPickle as pickle
 import tempfile
+import threading
 
 
 from lazyflow.graph import Operator, InputSlot, OutputSlot
@@ -39,7 +40,7 @@ class OpInterpMissingData(Operator):
     DetectionMethod = InputSlot(value='svm')
     InterpolationMethod = InputSlot(value='cubic')
     
-    # be careful when using the following: setting the same thing twice will not trigger
+    # be careful when using the following slot: setting the same thing twice will not trigger
     # the action you desire, even if something else has changed
     OverloadDetector = InputSlot(value='')
     
@@ -639,14 +640,30 @@ def _patchify(data, patchSize, haloSize):
     
     for y in range(nPatchesY):
         for x in range(nPatchesX):
-            
-            left = max(x*patchSize - haloSize, 0)
-            top = max(y*patchSize - haloSize, 0)
-            right = min((x+1)*patchSize + haloSize, data.shape[1])
+            right = min((x+1)*patchSize + haloSize, data.shape[1]) 
             bottom = min((y+1)*patchSize + haloSize, data.shape[0])
+            
+            rightIsIncomplete = (x+1)*patchSize>data.shape[1]
+            bottomIsIncomplete = (y+1)*patchSize>data.shape[0]
+            
+            left = max(x*patchSize - haloSize, 0) if not rightIsIncomplete \
+                    else max(0, right-patchSize-haloSize)
+            top = max(y*patchSize - haloSize, 0) if not bottomIsIncomplete \
+                    else max(0, bottom - patchSize - haloSize)
+            
             patches.append(data[top:bottom, left:right])
-            slices.append( (slice(patchSize*y, min( patchSize*(y+1), data.shape[0] )), \
-                slice(patchSize*x, min( patchSize*(x+1), data.shape[1] ))) )
+            
+            if rightIsIncomplete:
+                horzSlice = slice( max(data.shape[1]-patchSize, 0), data.shape[1]) 
+            else:
+                horzSlice = slice(patchSize*x, patchSize*(x+1)) 
+            
+            if bottomIsIncomplete:
+                vertSlice = slice( max(data.shape[0]-patchSize, 0), data.shape[0]) 
+            else:
+                vertSlice = slice(patchSize*y, patchSize*(y+1)) 
+                
+            slices.append( (vertSlice, horzSlice) )
             
     return (patches, slices)
 
@@ -705,13 +722,14 @@ class OpDetectMissing(Operator):
     Output = OutputSlot()
     Detector = OutputSlot(stype=Opaque)
     
-    
+    ### PRIVATE attributes ###
+    _needsTraining = True
+    _doCrossValidation = False
     
     ### PRIVATE class attributes ###
     _manager = SVMManager()
     _inputRange = (0,255)
-    _needsTraining = True
-    _doCrossValidation = False
+    _lock = threading.Lock()
     
     
     def __init__(self, *args, **kwargs):
@@ -1056,7 +1074,14 @@ class OpDetectMissing(Operator):
         
         svm.fit(samples, labels)
         
-        cls._manager.add(svm, nBins, overwrite=True)
+        # make setting the detector thread safe (at least a bit)
+        self._lock.acquire()
+        try:
+            cls._manager.add(svm, nBins, overwrite=True)
+        except:
+            raise
+        finally:
+            self._lock.release()
         
     @classmethod
     def predict(cls, X, method='classic'):
@@ -1071,8 +1096,12 @@ class OpDetectMissing(Operator):
         if method == 'classic' or not havesklearn:
             svm = PseudoSVC()
         else:
-            svm = cls._manager.get(nBins)
-            
+            try:
+                svm = cls._manager.get(nBins)
+            except NotTrainedError:
+                logger.error("Detector not trained yet, falling back to default mechanism.")
+                svm = PseudoSVC()
+                
         y = np.zeros((len(X),))*np.nan
         
         pool = RequestPool()
@@ -1116,7 +1145,15 @@ class OpDetectMissing(Operator):
     
     @classmethod
     def loads(cls, s):
-        cls._manager.overload(pickle.loads(s))
+        if len(s) == 0:
+            # do nothing
+            return
+        try:
+            d = pickle.loads(s)
+        except Exception as err:
+            logger.error("Could not load pickled stream: {}".format(str(err)))
+            return
+        cls._manager.overload(d)
         logger.debug("Loaded detector: {}".format(str(cls._manager)))
         
 
