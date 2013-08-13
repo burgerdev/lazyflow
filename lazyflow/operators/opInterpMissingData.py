@@ -281,22 +281,23 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
     # fill list of patch centers (VigraArray does not support bitwise_or)
     ind_z, ind_y, ind_x = np.where((labelsZYX==1).view(np.ndarray) | (labelsZYX==2).view(np.ndarray))
     index = np.arange(len(ind_z))
-    
+
     # prepare chunking of histogram centers
     chunkSize = 10000 #FIXME magic number??
     nChunks = len(index)//chunkSize + (1 if len(index) % chunkSize > 0 else 0)
-    s = [slice(k*chunkSize,min((k+1)*chunkSize,len(index))) for k in range(nChunks)]
+    sliceList = [slice(k*chunkSize,min((k+1)*chunkSize,len(index))) for k in range(nChunks)]
     histoList = [None]*nChunks
     
     # prepare subroutine for parallel extraction
     reporter = ProgressReporter(nChunks)
     
     #BEGIN subroutine
-    def _extract(index):
-        
+    def _extractHistogramsSub(itemlist):
+
         out = []
         
-        for z,y,x in zip(ind_z[index], ind_y[index],ind_x[index]):
+        for x,y,z in zip(ind_x, ind_y, ind_z):
+
             ymin = y - patchSize//2
             ymax = ymin + patchSize
             xmin = x - patchSize//2
@@ -304,7 +305,7 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
             
             if not (xmin < 0 or ymin < 0 or xmax > volumeZYX.shape[2] or ymax > volumeZYX.shape[1]):
                 # valid patch, add it to the output
-                if appendPositions:
+                if not appendPositions:
                     hist = np.zeros((nBins+1,))
                 else:
                     hist = np.zeros((nBins+4,))
@@ -318,7 +319,10 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
                 (np.zeros((0,nBins+1)) if not appendPositions else np.zeros((0,nBins+4)))
 
     def partFun(i):
-        histoList[i] = _extract(index[s[i]])
+        itemList = index[sliceList[i]]
+        histos = _extractHistogramsSub(itemList)
+        histoList[i] = histos
+
         reporter.report(i)
     #END subroutine
     
@@ -331,7 +335,7 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
     
     pool.wait()
     pool.clean()
-    
+
     return np.vstack(histoList)
 
 from threading import Lock as ThreadLock    
