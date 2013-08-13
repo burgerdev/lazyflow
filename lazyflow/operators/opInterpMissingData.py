@@ -295,7 +295,7 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
     def _extractHistogramsSub(itemlist):
 
         out = []
-        
+        #FIXME easily vectorized
         for x,y,z in zip(ind_x, ind_y, ind_z):
 
             ymin = y - patchSize//2
