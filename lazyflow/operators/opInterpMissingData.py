@@ -292,31 +292,42 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
     reporter = ProgressReporter(nChunks)
     
     #BEGIN subroutine
-    def _extractHistogramsSub(itemlist):
+    def _extractHistogramsSub(itemList):
 
-        out = []
-        #FIXME easily vectorized
-        for x,y,z in zip(ind_x, ind_y, ind_z):
-
-            ymin = y - patchSize//2
-            ymax = ymin + patchSize
-            xmin = x - patchSize//2
-            xmax = xmin + patchSize
-            
-            if not (xmin < 0 or ymin < 0 or xmax > volumeZYX.shape[2] or ymax > volumeZYX.shape[1]):
-                # valid patch, add it to the output
-                if not appendPositions:
-                    hist = np.zeros((nBins+1,))
-                else:
-                    hist = np.zeros((nBins+4,))
-                (hist[:nBins], _) = np.histogram(volumeZYX[z,ymin:ymax,xmin:xmax], bins=nBins, range=intRange, \
-                                            density = True)
-                hist[nBins] = 1 if labelsZYX[z,y,x] == 1 else 0
-                hist[nBins+1:] = [z,y,x]
-                out.append(hist)
+        xs = ind_x[itemList]
+        ys = ind_y[itemList]
+        zs = ind_z[itemList]
         
-        return np.vstack(out) if len(out) > 0 else \
-                (np.zeros((0,nBins+1)) if not appendPositions else np.zeros((0,nBins+4)))
+        ymin = ys - patchSize//2
+        ymax = ymin + patchSize
+        
+        xmin = xs - patchSize//2
+        xmax = xmin + patchSize
+        
+        validPatchIndices = np.where( \
+            np.all( ( ymin>=0,\
+              xmin>=0,\
+              xmax <= volumeZYX.shape[2],\
+              (ymax <= volumeZYX.shape[1]) 
+            ), axis=0 ) )[0]
+        
+        if appendPositions:
+            out = np.zeros((len(validPatchIndices), nBins+4))
+        else:
+            out = np.zeros((len(validPatchIndices), nBins+1))
+        
+        for k, patchInd in enumerate(validPatchIndices):
+            x = xs[patchInd]
+            y = ys[patchInd]
+            z = zs[patchInd]
+            
+            vol = volumeZYX[z, ymin[patchInd]:ymax[patchInd], xmin[patchInd]:xmax[patchInd]]
+            (out[k,:nBins], _) = np.histogram(vol, bins=nBins, range=intRange, density = True)
+            out[k,nBins] = 1 if labelsZYX[z,y,x] == 1 else 0
+            if appendPositions:
+                out[k,nBins+1:] = [z,y,x]
+            
+        return out
 
     def partFun(i):
         itemList = index[sliceList[i]]
@@ -866,11 +877,11 @@ class OpDetectMissing(Operator):
         
         logger.debug("Finished loading histogram data of shape {}.".format(histograms.shape))
         
-        assert histograms.shape[1] == self.NHistogramBins.value+1 and \
+        assert histograms.shape[1] >= self.NHistogramBins.value+1 and \
             len(histograms.shape) == 2, \
             "Training data has wrong shape (expected: (n,{}), got: {}.".format(self.NHistogramBins.value+1, histograms.shape)
         
-        labels = histograms[:,-1]
+        labels = histograms[:,self.NHistogramBins.value]
         histograms = histograms[:,:self.NHistogramBins.value]
         
         neg_inds = np.where(labels==0)[0]
@@ -1154,7 +1165,7 @@ if __name__ == "__main__":
     from lazyflow.operators.opInterpMissingData import _histogramIntersectionKernel, PseudoSVC
     
     logging.basicConfig()
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     
     thisTime = time.strftime("%Y-%m-%d_%H.%M")
     
@@ -1229,7 +1240,7 @@ if __name__ == "__main__":
     
     # END NORMALIZE
      
-    csvfile = open(os.path.join(workingdir, "%s_test_results.tsv" % (id,)), 'w')
+    csvfile = open(os.path.join(workingdir, "%s_test_results.tsv" % (thisTime,)), 'w')
     csvwriter = csv.DictWriter(csvfile, fieldnames=("patch", "halo", "bins", "recall", "precision"), delimiter=' ', quotechar='"', quoting=csv.QUOTE_MINIMAL)
     csvwriter.writeheader()
 
@@ -1239,6 +1250,7 @@ if __name__ == "__main__":
     op._felzenOpts = opts
 
     logger.info("Starting training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+    t_start = time.time()
 
     # iterate training conditions
     for patchSize in patchSizes:
@@ -1297,7 +1309,7 @@ if __name__ == "__main__":
                         testData = vigra.taggedView(volume[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
                         testLabels = vigra.taggedView(labels[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
                         
-                        testHistograms = extractHistograms(testData, testLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255))
+                        testHistograms = extractHistograms(testData, testLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255), appendPositions=True)
                     else:
                         testHistograms = np.zeros((0,trainHistograms.shape[1]))
                     
@@ -1318,6 +1330,14 @@ if __name__ == "__main__":
                     
                     #FIXME hack!
                     volShape = (512,1024,1024)
+                    
+                    assert trainHistograms.shape[1] == binSize+4
+                    assert testHistograms.shape[1] == binSize+4
+                    
+                    assert not np.any(np.isinf(trainHistograms))
+                    assert not np.any(np.isnan(trainHistograms))
+                    
+                    
             
             
                 # TRAIN
@@ -1357,9 +1377,9 @@ if __name__ == "__main__":
                 logger.info("Testing...")
                 
                 # split into histos, positions and labels
-                hists = testHistograms[:,0:testHistograms.shape[1]-1]
-                labels = testHistograms[:,testHistograms.shape[1]-1]
-                zyxPos = testHistograms[:,testHistograms.shape[1]:]
+                hists = testHistograms[:,:binSize]
+                labels = testHistograms[:,binSize]
+                zyxPos = testHistograms[:,binSize+1:]
                 
                 pred = op.predict(hists, method='svm')
                 predNeg = pred[np.where(labels==0)[0]]
@@ -1386,6 +1406,11 @@ if __name__ == "__main__":
                 vigra.impex.writeHDF5(predVol, predfile, '/volume/data')
 
     logger.info("Finished training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+    t_stop = time.time()
+    
+    logger.info("Duration: {}".format(time.strftime("%Hh, %Mm, %Ss", time.gmtime( (t_stop-t_start)%(24*60*60) ))))
+    if (t_stop-t_start) >= 24*60*60: logger.info( " and %d days!" % int(t_stop-t_start)//(24*60*60) )
+    
     csvfile.close()
                 
     
