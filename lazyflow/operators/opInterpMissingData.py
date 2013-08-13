@@ -248,7 +248,7 @@ class OpInterpMissingData(Operator):
         
 ### HISTOGRAM EXTRACTION FUNCTION ###
 
-def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, intRange=(0,255)):
+def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, intRange=(0,255), appendPositions=False):
     '''
     extracts histograms from 3d-volume 
      - labels are
@@ -304,13 +304,18 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
             
             if not (xmin < 0 or ymin < 0 or xmax > volumeZYX.shape[2] or ymax > volumeZYX.shape[1]):
                 # valid patch, add it to the output
-                hist = np.zeros((nBins+1,))
+                if appendPositions:
+                    hist = np.zeros((nBins+1,))
+                else:
+                    hist = np.zeros((nBins+4,))
                 (hist[:nBins], _) = np.histogram(volumeZYX[z,ymin:ymax,xmin:xmax], bins=nBins, range=intRange, \
                                             density = True)
                 hist[nBins] = 1 if labelsZYX[z,y,x] == 1 else 0
+                hist[nBins+1:] = [z,y,x]
                 out.append(hist)
         
-        return np.vstack(out) if len(out) > 0 else np.zeros((0,nBins+1))
+        return np.vstack(out) if len(out) > 0 else \
+                (np.zeros((0,nBins+1)) if not appendPositions else np.zeros((0,nBins+4)))
 
     def partFun(i):
         histoList[i] = _extract(index[s[i]])
@@ -716,9 +721,13 @@ class OpDetectMissing(Operator):
     
     ### PRIVATE class attributes ###
     _manager = SVMManager()
+
+    ### PRIVATE attributes ###
     _inputRange = (0,255)
     _needsTraining = True
     _doCrossValidation = False
+    _felzenOpts = {"firstSamples": 250, "maxRemovePerStep": 0, "maxAddPerStep": 250,\
+        "maxSamples": 1000, "nTrainingSteps": 4}
     
     
     def __init__(self, *args, **kwargs):
@@ -821,7 +830,6 @@ class OpDetectMissing(Operator):
             hists = np.vstack(hists)
             
             pred = self.predict(hists, method=self.DetectionMethod.value)
-            
             for i, p in enumerate(pred):
                 if p > 0: 
                     #patch is classified as missing
@@ -936,14 +944,14 @@ class OpDetectMissing(Operator):
         
         n = (self.PatchSize.value + self.HaloSize.value)**2
         method = self.DetectionMethod.value
-        
-        #FIXME arbitrary
-        firstSamples = 250
-        maxRemovePerStep = 0
-        maxAddPerStep = 250
-        maxSamples = 1000
-        nTrainingSteps = 4
-        
+
+        # set options for Felzenszwalb training
+        firstSamples = self._felzenOpts["firstSamples"]
+        maxRemovePerStep = self._felzenOpts["maxRemovePerStep"]
+        maxAddPerStep = self._felzenOpts["maxAddPerStep"]
+        maxSamples = self._felzenOpts["maxSamples"]
+        nTrainingSteps = self._felzenOpts["nTrainingSteps"]
+
         # initial choice of training samples
         (initNegative,choiceNegative, _, _) = _chooseRandomSubset(negative, min(firstSamples, len(negative)))
         (initPositive,choicePositive, _, _) = _chooseRandomSubset(positive, min(firstSamples, len(positive)))
@@ -1135,6 +1143,7 @@ if __name__ == "__main__":
     import os.path
     from sys import exit
     import time
+    import csv
     
     from lazyflow.graph import Graph
     
@@ -1143,6 +1152,7 @@ if __name__ == "__main__":
     logging.basicConfig()
     logger.setLevel(logging.INFO)
     
+    thisTime = time.strftime("%Y-%m-%d_%H.%M")
     
     # BEGIN ARGPARSE
     
@@ -1163,6 +1173,10 @@ if __name__ == "__main__":
     parser.add_argument('--patch', dest='patchSize', action='store', default='64', help='patch size (e.g.: "32,64-128")')
     parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size (e.g.: "32,64-128")')
     parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins (e.g.: "10-15,20")')
+
+    parser.add_argument('--opts', dest='opts', action='store', default='250,0,250,1000,4', \
+        help='<initial number of samples>,<maximum number of samples removed per step>,<maximum number of samples added per step>,'+ \
+            '<maximum number of samples>,<number of steps> (e.g. 250,0,250,1000,4)')
     
     args = parser.parse_args()
     
@@ -1200,19 +1214,37 @@ if __name__ == "__main__":
     patchSizes = _expand(args.patchSize)
     haloSizes = _expand(args.haloSize)
     binSizes = _expand(args.binSize)
+
+    try:
+        opts = [int(opt) for opt in args.opts.split(",")]
+        assert len(opts) == 5
+        opts = dict(zip(["firstSamples", "maxRemovePerStep", "maxAddPerStep",\
+            "maxSamples", "nTrainingSteps"], opts))
+    except:
+        raise ValueError("Cannot parse '--opts' argument '{}'".format(args.opts))
     
     # END NORMALIZE
-    
+     
+    csvfile = open(os.path.join(workingdir, "%s_test_results.tsv" % (id,)), 'w')
+    csvwriter = csv.DictWriter(csvfile, fieldnames=("patch", "halo", "bins", "recall", "precision"), delimiter=' ', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    csvwriter.writeheader()
+
+
     
     op = OpDetectMissing(graph=Graph())
-    
+    op._felzenOpts = opts
+
+    logger.info("Starting training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+
     # iterate training conditions
     for patchSize in patchSizes:
         for haloSize in haloSizes:
             for binSize in binSizes:
                 #FIXME optimize for already computed patch sizes ( (64,0) vs. (32,16) )
                 histfile = os.path.join(workingdir, "histograms_%d_%d_%d.h5" % (patchSize, haloSize, binSize))
-                detfile = os.path.join(workingdir, "detector_%d_%d_%d.pkl" % (patchSize, haloSize, binSize))
+                detfile = os.path.join(workingdir, "%s_detector_%d_%d_%d.pkl" % (thisTime, patchSize, haloSize, binSize))
+                predfile = os.path.join(workingdir, "%s_prediction_results_%d_%d_%d.h5" % (thisTime, patchSize, haloSize, binSize))
+
                 startFromLabels = args.force or not os.path.exists(histfile)
                 
                 # EXTRACT HISTOGRAMS
@@ -1233,6 +1265,7 @@ if __name__ == "__main__":
                             pass
                     if volume is None:
                         logger.error("Could not find a volume in {} with paths {}".format(args.file[0], locs))
+                        csvfile.close()
                         exit(42)
                         
                     for l in locs:
@@ -1243,7 +1276,10 @@ if __name__ == "__main__":
                             pass
                     if labels is None:
                         logger.error("Could not find a volume in {} with paths {}".format(args.file[1], locs))
+                        csvfile.close()
                         exit(43)
+                    
+                    volShape = volume.shape
                     
                     # bear with me, complicated axistags stuff is for my old vigra to work
                     trainrange = np.setdiff1d(np.arange(volume.shape[0]), testrange)
@@ -1251,7 +1287,7 @@ if __name__ == "__main__":
                     trainData = vigra.taggedView(volume[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
                     trainLabels = vigra.taggedView(labels[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
                     
-                    trainHistograms = extractHistograms(trainData, trainLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255))
+                    trainHistograms = extractHistograms(trainData, trainLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255), appendPositions=True)
                     
                     if len(testrange)>0:
                         testData = vigra.taggedView(volume[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
@@ -1275,6 +1311,9 @@ if __name__ == "__main__":
                     except KeyError:
                         testHistograms = np.zeros((0,trainHistograms.shape[1]))
                     logger.info("Loaded histograms from '{}'.".format(histfile))
+                    
+                    #FIXME hack!
+                    volShape = (512,1024,1024)
             
             
                 # TRAIN
@@ -1286,7 +1325,7 @@ if __name__ == "__main__":
                 op.DetectionMethod.setValue('svm')
                 op.NHistogramBins.setValue(binSize)
                 
-                op.TrainingHistograms.setValue(trainHistograms)
+                op.TrainingHistograms.setValue(trainHistograms[:,:binSize+1])
                 
                 op.train(force=True)
                 
@@ -1313,15 +1352,14 @@ if __name__ == "__main__":
                 
                 logger.info("Testing...")
                 
-                # split into histos and labels
+                # split into histos, positions and labels
                 hists = testHistograms[:,0:testHistograms.shape[1]-1]
                 labels = testHistograms[:,testHistograms.shape[1]-1]
+                zyxPos = testHistograms[:,testHistograms.shape[1]:]
                 
-                negTest = hists[np.where(labels==0)[0],...]
-                posTest = hists[np.where(labels==1)[0],...]
-                
-                predNeg = op.predict(negTest, method='svm')
-                predPos = op.predict(posTest, method='svm')
+                pred = op.predict(hists, method='svm')
+                predNeg = pred[np.where(labels==0)[0]]
+                predPos = pred[np.where(labels==1)[0]]
 
                 fp = (predNeg.sum())/float(predNeg.size); 
                 fn = (predPos.size - predPos.sum())/float(predPos.size)
@@ -1331,7 +1369,20 @@ if __name__ == "__main__":
                 
                 logger.info(" Predicted {} histograms with patchSize={}, haloSize={}, bins={}.".format(len(hists), patchSize, haloSize, binSize))
                 logger.info(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
-                
+                csvwriter.writerow({'patch': patchSize, 'halo': haloSize, 'bins': binSize, 'recall': recall, 'precision': prec})
+
+
+                logger.info("Writing prediction volume...")
+
+                predVol = vigra.VigraArray(np.zeros(volShape, dtype=np.uint8), axistags=vigra.defaultAxistags('zyx'))
+
+                for i, p in enumerate(pred):
+                    predVol[tuple(zyxPos[i])] = p
+
+                vigra.impex.writeHDF5(predVol, predfile, '/volume/data')
+
+    logger.info("Finished training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+    csvfile.close()
                 
     
         

@@ -282,8 +282,25 @@ class TestDetection(unittest.TestCase):
             assert has, "Mising patch {}".format(ep)
             pass
         
-        # FIXME missing slice comparison
-                    
+    def testPatchDetection(self):
+        vol = vigra.taggedView(np.ones((5,5), dtype=np.uint8)*128, axistags=vigra.defaultAxistags('xy'))
+        vol[2:5,2:5] = 0
+        expected = np.zeros((5,5))
+        expected[3:5,3:5] = 1
+
+        self.op.PatchSize.setValue(2)
+        self.op.HaloSize.setValue(1)
+        self.op.DetectionMethod.setValue('classic')
+        self.op.InputVolume.setValue(vol)
+
+        out = self.op.Output[:].wait()
+        
+        assert_array_equal(expected[3:5,3:5], out[3:5,3:5])
+        
+
+
+
+
         
     
 class TestInterpolation(unittest.TestCase):
