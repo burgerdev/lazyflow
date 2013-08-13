@@ -243,6 +243,11 @@ class TestDetection(unittest.TestCase):
         from lazyflow.operators.opInterpMissingData import _patchify as patchify
         
         X = np.vander(np.arange(2,5))
+        ''' results in 
+        X = array([[ 4,  2,  1],
+                   [ 9,  3,  1],
+                   [16,  4,  1]])
+        '''
         (patches,slices) = patchify(X,1,1)
         
         expected = [np.array([[4,2],[9,3]]), \
@@ -254,14 +259,28 @@ class TestDetection(unittest.TestCase):
                     np.array([[9,3],[16,4]]), \
                     np.array([[9,3,1],[16,4,1]]), \
                     np.array([[3,1],[4,1]])]
+
+        expSlices = [(slice(0,1),slice(0,1)), \
+                  (slice(0,1), slice(1,2)), \
+                  (slice(0,1), slice(2,3)), \
+                  (slice(1,2), slice(0,1)), \
+                  (slice(1,2), slice(1,2)), \
+                  (slice(1,2), slice(2,3)), \
+                  (slice(2,3), slice(0,1)), \
+                  (slice(2,3), slice(1,2)), \
+                  (slice(2,3), slice(2,3))]
                 
-        for ep in expected:
+        for ep, s in zip(expected,expSlices):
+            #check if patch is in the result
             has = False
-            for p in patches:
+            for i,p in enumerate(patches):
                 if np.all(p == ep):
                     has = True
+                    # check if slice is ok
+                    self.assertEqual(s, slices[i])
             
             assert has, "Mising patch {}".format(ep)
+            pass
         
         # FIXME missing slice comparison
                     

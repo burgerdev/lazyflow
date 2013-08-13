@@ -83,18 +83,6 @@ class OpInterpMissingData(Operator):
         # Output has the same shape/axes/dtype/drange as input
         self.Output.meta.assignFrom( self.InputVolume.meta )
 
-        '''
-        # Check for errors
-        taggedShape = self.InputVolume.meta.getTaggedShape()
-        
-        # this assumption is important!
-        #FIXME why??
-        if 't' in taggedShape:
-            assert taggedShape['t'] == 1, "Non-spatial dimensions must be of length 1"
-        if 'c' in taggedShape:
-            assert taggedShape['c'] == 1, "Non-spatial dimensions must be of length 1"
-        '''
-        
         self.Detector.meta.shape = (1,)
 
     def execute(self, slot, subindex, roi, result):
@@ -783,7 +771,6 @@ class OpDetectMissing(Operator):
             "Unknown detection method '{}'".format(self.DetectionMethod.value)
         
         # prefill result
-        #result[:] = 0
         resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
             
         # acquire data
@@ -793,17 +780,16 @@ class OpDetectMissing(Operator):
         # walk over time and channel axes
         for t in range(dataZYXCT.shape[4]):
             for c in range(dataZYXCT.shape[3]):
-                resultZYXCT[...,c,t] = self._detectMissing(slot, dataZYXCT[...,c,t])
+                resultZYXCT[...,c,t] = self._detectMissing(dataZYXCT[...,c,t])
 
         return result
     
 
-    def _detectMissing(self, slot, data):
+    def _detectMissing(self, data):
         '''
-        detects missing regions and labels each missing region with 
-        its own integer value
-        :param origData: 3d data 
-        :type origData: array-like
+        detects missing regions and labels each missing region with 1
+        :param data: 3d data with axistags 'zyx' 
+        :type data: array-like
         '''
         
         assert data.axistags.index('z') == 0 \
@@ -812,7 +798,7 @@ class OpDetectMissing(Operator):
             and len(data.shape) == 3, \
             "Data must be 3d with axis 'zyx'."
         
-        result = vigra.VigraArray(data)*0
+        result = np.zeros(data.shape, dtype=np.uint8)
         
         patchSize = self.PatchSize.value
         haloSize = self.HaloSize.value
@@ -822,15 +808,7 @@ class OpDetectMissing(Operator):
         if haloSize is None or haloSize<0:
             raise ValueError("HaloSize must be a non-negative integer")
         
-        #if np.any(patchSize>np.asarray(data.shape[1:])):
-            #logger.debug("Ignoring small region (shape={})".format(dict(zip([k.key for k in data.axistags], data.shape))))
-            #maxZ=0
-        #else:
         maxZ = data.shape[0]
-            
-        #from pdb import set_trace;set_trace()
-        # pixels in patch
-        nPatchElements = (patchSize+haloSize)**2
             
         # walk over slices
         for z in range(maxZ):
@@ -843,12 +821,11 @@ class OpDetectMissing(Operator):
             hists = np.vstack(hists)
             
             pred = self.predict(hists, method=self.DetectionMethod.value)
-
             
             for i, p in enumerate(pred):
                 if p > 0: 
                     #patch is classified as missing
-                    result[z, slices[i][0], slices[i][1]] = 1
+                    result[z, slices[i][0], slices[i][1]] |= 1
          
         return result
         
