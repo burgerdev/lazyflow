@@ -1152,6 +1152,17 @@ class OpDetectMissing(Operator):
             logger.debug("Loaded detector: {}".format(str(cls._manager)))
         
 
+
+
+def toH5(data, pathOrGroup, pathInFile, compression=None):
+    try:
+        return vigra.impex.writeHDF5(data, pathOrGroup, pathInFile, compression)
+    except TypeError:
+        # old vigra does not support compression
+        logger.debug("'compression' argument not supported by vigra (pull request ukoethe/vigra#147 probably still pending).")
+        return vigra.impex.writeHDF5(data, pathOrGroup, pathInFile)
+
+
 if __name__ == "__main__":
     
     import argparse
@@ -1403,7 +1414,7 @@ if __name__ == "__main__":
                 for i, p in enumerate(pred):
                     predVol[tuple(zyxPos[i])] = p
 
-                vigra.impex.writeHDF5(predVol, predfile, '/volume/data')
+                toH5(predVol, predfile, '/volume/data', compression="GZIP")
 
     logger.info("Finished training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
     t_stop = time.time()
