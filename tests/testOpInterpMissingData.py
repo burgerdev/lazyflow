@@ -240,7 +240,7 @@ class TestDetection(unittest.TestCase):
         self.op.loads(dumpedString)
         
     def testPatchify(self):
-        from lazyflow.operators.opInterpMissingData import _patchify as patchify
+        from lazyflow.operators.opDetectMissingData import _patchify as patchify
         
         X = np.vander(np.arange(2,5))
         ''' results in 
