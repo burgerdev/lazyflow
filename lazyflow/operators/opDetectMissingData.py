@@ -821,29 +821,32 @@ if __name__ == "__main__":
     from sys import exit
     import time
     import csv
-    
+
     from lazyflow.graph import Graph
-    
-    from lazyflow.operators.opInterpMissingData import _histogramIntersectionKernel, PseudoSVC
-    
+
+
     logging.basicConfig()
-    logger.setLevel(logging.DEBUG)
-    
+    logger.setLevel(logging.INFO)
+
     thisTime = time.strftime("%Y-%m-%d_%H.%M")
-    
+
     # BEGIN ARGPARSE
-    
-    parser = argparse.ArgumentParser(description='Train a missing slice detector')
-    
+
+    parser = argparse.ArgumentParser(description='Train a missing slice detector'+ 
+                                     """
+                                     Example invocation:
+                                     python2 opDetectMissingData.py block1_test.h5 block1_testLabels.h5 --patch 64 --halo 32 --bins 30 -d ~/testing/2013_08_16 -t 9-12 --opts 200,0,400,1000,2 --shape "(1024,1024,14)"
+                                     """)
+
     parser.add_argument('file', nargs='*', action='store', \
         help="volume and labels (if omitted, the working directory must contain histogram files)")
-    
+
     parser.add_argument('-d', '--directory', dest='directory', action='store', default="/tmp",\
         help='working directory, histograms and detector file will be stored there')
-    
+
     parser.add_argument('-t', '--testingrange', dest='testingrange', action='store', default=None,\
         help='the z range of the labels that are for testing (like "0-3,11,17-19" which would evaluate to [0,1,2,3,11,17,18,19])')
-    
+
     parser.add_argument('-f', '--force', dest='force', action='store_true', default=False, \
         help='force extraction of histograms, even if the directory already contains histograms')
 
@@ -851,24 +854,26 @@ if __name__ == "__main__":
     parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size (e.g.: "32,64-128")')
     parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins (e.g.: "10-15,20")')
 
+    parser.add_argument('--shape', dest='shape', action='store', default=None, help='shape of the volume in tuple notation "(x,y,z)" (only neccessary if loading histograms from file)')
+
     parser.add_argument('--opts', dest='opts', action='store', default='250,0,250,1000,4', \
         help='<initial number of samples>,<maximum number of samples removed per step>,<maximum number of samples added per step>,'+ \
             '<maximum number of samples>,<number of steps> (e.g. 250,0,250,1000,4)')
-    
+
     args = parser.parse_args()
-    
+
     # END ARGPARSE
-    
+
     # BEGIN FILESYSTEM
-    
+
     workingdir = args.directory
     assert os.path.isdir(workingdir), "Directory '{}' does not exist.".format(workingdir)
     for f in args.file: assert os.path.isfile(f), "'{}' does not exist.".format(f)
-    
+
     # END FILESYSTEM
-    
+
     # BEGIN NORMALIZE
-    
+
     def _expand(rangelist):
         if rangelist is not None:
             singleRanges = rangelist.split(',')
@@ -885,9 +890,9 @@ if __name__ == "__main__":
             return np.asarray(expandedRanges)
         else:
             return np.zeros((0,))
-    
+
     testrange = _expand(args.testingrange)
-    
+
     patchSizes = _expand(args.patchSize)
     haloSizes = _expand(args.haloSize)
     binSizes = _expand(args.binSize)
@@ -899,9 +904,9 @@ if __name__ == "__main__":
             "maxSamples", "nTrainingSteps"], opts))
     except:
         raise ValueError("Cannot parse '--opts' argument '{}'".format(args.opts))
-    
+
     # END NORMALIZE
-     
+ 
     csvfile = open(os.path.join(workingdir, "%s_test_results.tsv" % (thisTime,)), 'w')
     csvwriter = csv.DictWriter(csvfile, fieldnames=("patch", "halo", "bins", "recall", "precision"), delimiter=' ', quotechar='"', quoting=csv.QUOTE_MINIMAL)
     csvwriter.writeheader()
@@ -987,15 +992,27 @@ if __name__ == "__main__":
                     except KeyError:
                         testHistograms = np.zeros((0,trainHistograms.shape[1]))
                     logger.info("Loaded histograms from '{}'.".format(histfile))
-                    
-                    #FIXME hack!
-                    volShape = (512,1024,1024)
-                    
+
                     assert trainHistograms.shape[1] == binSize+4
                     assert testHistograms.shape[1] == binSize+4
                     
+                    if len(testHistograms)>0:
+                        if args.shape is None:
+                            logger.warning("Guessing the shape of the original data...")
+                            volShape = (512,1024,1024,1,1)
+                        else:
+                            volShape = eval(args.shape)
+                            assert isinstance(volShape, tuple) and len(volShape)==3
+                            
+                        
+
+                                
+                    
                     assert not np.any(np.isinf(trainHistograms))
                     assert not np.any(np.isnan(trainHistograms))
+                    
+                    assert not np.any(np.isinf(testHistograms))
+                    assert not np.any(np.isnan(testHistograms))
                     
                 # TRAIN
             
@@ -1055,10 +1072,10 @@ if __name__ == "__main__":
 
                 logger.info("Writing prediction volume...")
 
-                predVol = vigra.VigraArray(np.zeros(volShape, dtype=np.uint8), axistags=vigra.defaultAxistags('zyx'))
+                predVol = vigra.VigraArray(np.zeros(volShape, dtype=np.uint8), axistags=vigra.defaultAxistags('xyz')).withAxes(*'zyx')
 
                 for i, p in enumerate(pred):
-                    predVol[tuple(zyxPos[i])] = p
+                    predVol[testrange[zyxPos[i][0]], zyxPos[i][1], zyxPos[i][2]] = p
 
                 toH5(predVol, predfile, '/volume/data', compression="GZIP")
 
