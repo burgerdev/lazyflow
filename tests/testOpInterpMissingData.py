@@ -435,16 +435,16 @@ class TestInterpMissingData(unittest.TestCase):
     '''
     tests for the whole detection/interpolation workflow
     '''
-    
-    
+
     def setUp(self):
-        g=Graph()
-        op = OpInterpMissingData(graph = g)
+        g = Graph()
+        op = OpInterpMissingData(graph=g)
         op.DetectionMethod.setValue('svm')
         op.train(force=True)
+        assert op.detector.has(op.detector.NHistogramBins.value,
+                               method='svm'), "Detector not trained."
         self.op = op
-        
-        
+
     def testDetectorPropagation(self):
         if not havesklearn:
             return
@@ -453,15 +453,18 @@ class TestInterpMissingData(unittest.TestCase):
         v = _volume()
         self.op.InputVolume.setValue(v)
         s = self.op.Detector[:].wait()
-        self.op.detector.reset()
-        assert not self.op.detector.has(self.op.detector.NHistogramBins.value, method=method), "Detector not reset."
-        self.op.OverloadDetector.setValue(s)
-        assert self.op.detector.has(self.op.detector.NHistogramBins.value,method=method), "Detector not loaded."
 
-        
+        self.op.detector.reset()
+        assert not self.op.detector.has(self.op.detector.NHistogramBins.value,
+                                        method=method), "Detector not reset."
+
+        self.op.OverloadDetector.setValue(s)
+        assert self.op.detector.has(self.op.detector.NHistogramBins.value,
+                                    method=method), "Detector not loaded."
+
     def testLinearBasics(self):
         self.op.InputSearchDepth.setValue(0)
-        
+
         interpolationMethod = 'linear'
         self.op.InterpolationMethod.setValue(interpolationMethod)
 

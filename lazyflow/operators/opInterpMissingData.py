@@ -109,12 +109,12 @@ class OpInterpMissingData(Operator):
         if c_index < len(roi.start):
             cRange = np.arange(roi.start[c_index], roi.stop[c_index])
         else:
-            np.array([0])
+            cRange = np.array([0])
 
         if t_index < len(roi.start):
             tRange = np.arange(roi.start[t_index], roi.stop[t_index])
         else:
-            np.array([0])
+            tRange = np.array([0])
 
         for c in cRange:
             for t in tRange:
@@ -236,9 +236,6 @@ class OpInterpMissingData(Operator):
         roi.stop = np.copy(origStop)
 
         return (offset_top, offset_bot)
-
-
-
 
 ################################
 ################################

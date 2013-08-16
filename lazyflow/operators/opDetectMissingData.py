@@ -385,7 +385,6 @@ class OpDetectMissing(Operator):
             svm = SVC(C=1000, kernel=_histogramIntersectionKernel)
 
         svm.fit(samples, labels)
-
         cls._manager.add(svm, nBins, overwrite=True)
 
     @classmethod
@@ -419,7 +418,7 @@ class OpDetectMissing(Operator):
         chunkSize = 1000  # FIXME magic number??
         nChunks = len(X)/chunkSize + (1 if len(X) % chunkSize > 0 else 0)
 
-        s = [slice(k*chunkSize,min((k+1)*chunkSize, len(X)))
+        s = [slice(k*chunkSize, min((k+1)*chunkSize, len(X)))
              for k in range(nChunks)]
 
         def partFun(i):
@@ -441,6 +440,7 @@ class OpDetectMissing(Operator):
 
         if cls._manager is None:
             cls._manager = SVMManager()
+        logger.debug(str(cls._manager))
 
         if method == 'classic' or not havesklearn:
             return True
@@ -473,7 +473,7 @@ class OpDetectMissing(Operator):
                     "Failed overlaoding detector due to an error: {}".format(
                         str(err)))
                 return
-
+            cls._manager.overload(d)
             logger.debug("Loaded detector: {}".format(str(cls._manager)))
 
 
