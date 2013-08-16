@@ -407,7 +407,8 @@ class OpDetectMissing(Operator):
         else:
             try:
                 svm = cls._manager.get(nBins)
-            except NotTrainedError:
+            except SVMManager.NotTrainedError:
+                raise
                 # fail gracefully if not trained => responsibility of user!
                 svm = PseudoSVC()
 
@@ -470,7 +471,7 @@ class OpDetectMissing(Operator):
                 d = pickle.loads(s)
             except Exception as err:
                 logger.error(
-                    "Failed overlaoding detector due to an error: {}".format(
+                    "Failed overloading detector due to an error: {}".format(
                         str(err)))
                 return
             cls._manager.overload(d)
@@ -524,7 +525,7 @@ class SVMManager(object):
         try:
             return self._svms[n]
         except KeyError:
-            raise NotTrainedError(
+            raise self.NotTrainedError(
                 "Detector for bin size {} not trained.\nHave {}.".format(
                     n, self._svms))
 
@@ -809,6 +810,9 @@ if __name__ == "__main__":
     import csv
 
     from lazyflow.graph import Graph
+
+    # this is important, pickled detectors can't be loaded otherwise
+    from lazyflow.operators.opDetectMissingData import _histogramIntersectionKernel
 
     logging.basicConfig()
     logger.setLevel(logging.INFO)
