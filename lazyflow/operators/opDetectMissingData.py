@@ -2,7 +2,7 @@ import logging
 from functools import partial
 import cPickle as pickle
 import tempfile
-from threading import Lock as ThreadLock    
+from threading import Lock as ThreadLock
 
 
 from lazyflow.graph import Operator, InputSlot, OutputSlot
@@ -47,178 +47,180 @@ class OpDetectMissing(Operator):
     '''
     Sub-Operator for detection of missing image content
     '''
-    
+
     InputVolume = InputSlot()
     PatchSize = InputSlot(value=128)
     HaloSize = InputSlot(value=30)
     DetectionMethod = InputSlot(value='classic')
     NHistogramBins = InputSlot(value=_defaultBinSize)
     OverloadDetector = InputSlot(value='')
-    
+
     #histograms: ndarray, shape: nHistograms x (NHistogramBins.value + 1)
     # the last column holds the label, i.e. {0: negative, 1: positive}
     TrainingHistograms = InputSlot()
-    
-    
+
     Output = OutputSlot()
     Detector = OutputSlot(stype=Opaque)
-    
-    
-    
+
     ### PRIVATE class attributes ###
     _manager = None
 
     ### PRIVATE attributes ###
-    _inputRange = (0,255)
+    _inputRange = (0, 255)
     _needsTraining = True
-    _doCrossValidation = False
-    _felzenOpts = {"firstSamples": 250, "maxRemovePerStep": 0, "maxAddPerStep": 250,\
-        "maxSamples": 1000, "nTrainingSteps": 4}
-    
-    
+    _felzenOpts = {"firstSamples": 250, "maxRemovePerStep": 0,
+                   "maxAddPerStep": 250, "maxSamples": 1000,
+                   "nTrainingSteps": 4}
+
     def __init__(self, *args, **kwargs):
         super(OpDetectMissing, self).__init__(*args, **kwargs)
         self.TrainingHistograms.setValue(_defaultTrainingHistograms())
-        
-        
+
     def propagateDirty(self, slot, subindex, roi):
         if slot == self.InputVolume:
             self.Output.setDirty(roi)
+
         if slot == self.TrainingHistograms:
             OpDetectMissing._needsTraining = True
-            
+
         if slot == self.NHistogramBins:
-            OpDetectMissing._needsTraining = OpDetectMissing._manager.has(self.NHistogramBins.value)
-            
+            OpDetectMissing._needsTraining = \
+                OpDetectMissing._manager.has(self.NHistogramBins.value)
+
         if slot == self.PatchSize or slot == self.HaloSize:
             self.Output.setDirty()
-            
+
         if slot == self.OverloadDetector:
             s = self.OverloadDetector.value
             self.loads(s)
             self.Output.setDirty()
-        
-    
+
     def setupOutputs(self):
-        self.Output.meta.assignFrom( self.InputVolume.meta )
+        self.Output.meta.assignFrom(self.InputVolume.meta)
         self.Output.meta.dtype = np.uint8
-        
+
         # determine range of input
         if self.InputVolume.meta.dtype == np.uint8:
-            r = (0,255) 
+            r = (0, 255) 
         elif self.InputVolume.meta.dtype == np.uint16:
-            r = (0,65535) 
+            r = (0, 65535) 
         else:
             #FIXME hardcoded range, use np.iinfo
-            r = (0,255)
+            r = (0, 255)
         self._inputRange = r
-        
+
         self.Detector.meta.shape = (1,)
 
-
     def execute(self, slot, subindex, roi, result):
-        
+
         if slot == self.Detector:
             result = self.dumps()
             return result
-        
+
         # sanity check
         assert self.DetectionMethod.value in ['svm', 'classic'], \
             "Unknown detection method '{}'".format(self.DetectionMethod.value)
-        
+
         # prefill result
-        resultZYXCT = vigra.taggedView(result,self.InputVolume.meta.axistags).withAxes(*'zyxct')
-            
+        resultZYXCT = vigra.taggedView(
+            result, self.InputVolume.meta.axistags).withAxes(*'zyxct')
+
         # acquire data
         data = self.InputVolume.get(roi).wait()
-        dataZYXCT = vigra.taggedView(data,self.InputVolume.meta.axistags).withAxes(*'zyxct')
-        
+        dataZYXCT = vigra.taggedView(
+            data, self.InputVolume.meta.axistags).withAxes(*'zyxct')
+
         # walk over time and channel axes
         for t in range(dataZYXCT.shape[4]):
             for c in range(dataZYXCT.shape[3]):
-                resultZYXCT[...,c,t] = self._detectMissing(dataZYXCT[...,c,t])
+                resultZYXCT[..., c, t] = \
+                    self._detectMissing(dataZYXCT[..., c, t])
 
         return result
-    
 
     def _detectMissing(self, data):
         '''
         detects missing regions and labels each missing region with 1
-        :param data: 3d data with axistags 'zyx' 
+        :param data: 3d data with axistags 'zyx'
         :type data: array-like
         '''
-        
+
         assert data.axistags.index('z') == 0 \
             and data.axistags.index('y') == 1 \
             and data.axistags.index('x') == 2 \
             and len(data.shape) == 3, \
             "Data must be 3d with axis 'zyx'."
-        
+
         result = np.zeros(data.shape, dtype=np.uint8)
-        
+
         patchSize = self.PatchSize.value
         haloSize = self.HaloSize.value
-        
-        if patchSize is None or not patchSize>0:
+
+        if patchSize is None or not patchSize > 0:
             raise ValueError("PatchSize must be a positive integer")
-        if haloSize is None or haloSize<0:
+        if haloSize is None or haloSize < 0:
             raise ValueError("HaloSize must be a non-negative integer")
-        
+
         maxZ = data.shape[0]
-            
+
         # walk over slices
         for z in range(maxZ):
-            patches, slices = _patchify(data[z,:,:], patchSize, haloSize)
+            patches, slices = _patchify(data[z, :, :], patchSize, haloSize)
             hists = []
             # walk over patches
             for patch in patches:
-                (hist, _) = np.histogram(patch, bins=self.NHistogramBins.value, range=self._inputRange, density=True)
+                (hist, _) = np.histogram(
+                    patch, bins=self.NHistogramBins.value,
+                    range=self._inputRange, density=True)
                 hists.append(hist)
             hists = np.vstack(hists)
-            
+
             pred = self.predict(hists, method=self.DetectionMethod.value)
             for i, p in enumerate(pred):
-                if p > 0: 
+                if p > 0:
                     #patch is classified as missing
                     result[z, slices[i][0], slices[i][1]] |= 1
-         
+
         return result
-        
-        
+
     def train(self, force=False):
         '''
         trains with samples drawn from slot TrainingHistograms
         (retrains only if bin size is currently untrained or force is True)
         '''
-        
+
         # return early if unneccessary
-        if not force and not OpDetectMissing._needsTraining and OpDetectMissing._manager.has(self.NHistogramBins.value):
+        if not force and not OpDetectMissing._needsTraining and \
+                OpDetectMissing._manager.has(self.NHistogramBins.value):
             return
-        
+
         #return if we don't have svms
         if not havesklearn:
             return
-        
-        logger.debug("Training for {} histogram bins ...".format(self.NHistogramBins.value))
-        
+
+        logger.debug("Training for {} histogram bins ...".format(
+            self.NHistogramBins.value))
+
         if self.DetectionMethod.value == 'classic' or not havesklearn:
             # no need to train this
             return
-        
+
         histograms = self.TrainingHistograms[:].wait()
-        
-        logger.debug("Finished loading histogram data of shape {}.".format(histograms.shape))
-        
+
+        logger.debug("Finished loading histogram data of shape {}.".format(
+            histograms.shape))
+
         assert histograms.shape[1] >= self.NHistogramBins.value+1 and \
             len(histograms.shape) == 2, \
-            "Training data has wrong shape (expected: (n,{}), got: {}.".format(self.NHistogramBins.value+1, histograms.shape)
-        
-        labels = histograms[:,self.NHistogramBins.value]
-        histograms = histograms[:,:self.NHistogramBins.value]
-        
-        neg_inds = np.where(labels==0)[0]
+            "Training data has wrong shape (expected: (n,{}), got: {}.".format(
+                self.NHistogramBins.value+1, histograms.shape)
+
+        labels = histograms[:, self.NHistogramBins.value]
+        histograms = histograms[:, :self.NHistogramBins.value]
+
+        neg_inds = np.where(labels == 0)[0]
         pos_inds = np.setdiff1d(np.arange(len(labels)), neg_inds)
-        
+
         pos = histograms[pos_inds]
         neg = histograms[neg_inds]
         npos = len(pos)
@@ -232,63 +234,24 @@ class OpDetectMissing(Operator):
         crec = np.zeros((nfolds,))
         pos_random = np.random.permutation(len(pos))
         neg_random = np.random.permutation(len(neg))
-        
-        if self._doCrossValidation:
-            with tempfile.NamedTemporaryFile(suffix='.txt', prefix='crossvalidation_', delete=False) as templogfile:
-                for i in range(nfolds):
-                    logger.debug("starting cross validation fold {}".format(i))
-                    
-                    # partition the set in training and test data, use i-th for testing
-                    posTest=pos[pos_random[i*npos/nfolds:(i+1)*npos/nfolds],:]
-                    posTrain = np.vstack((pos[pos_random[0:i*npos/nfolds],:], pos[pos_random[(i+1)*npos/nfolds:],:]))
-                    
-                    negTest=neg[neg_random[i*nneg/nfolds:(i+1)*nneg/nfolds],:]
-                    negTrain = np.vstack((neg[neg_random[0:i*nneg/nfolds],:], neg[neg_random[(i+1)*nneg/nfolds:],:]))
-                    
-                    logger.debug("positive training shape {}, negative training shape {}, positive testing shape {}, negative testing shape {}".format(posTrain.shape, negTrain.shape, posTest.shape, negTest.shape))
 
-                    #FIXME do we need a minimum training set size??
-                    
-                    logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(negTrain), len(posTrain)))
-                    self._felzenszwalbTraining(negTrain, posTrain)
-                
+        logger.debug(
+            "Starting training with " +
+            "{} negative patches and {} positive patches...".format(
+                len(neg), len(pos)))
+        self._felzenszwalbTraining(neg, pos)
+        logger.debug("Finished training.")
 
-                    predNeg = self.predict(negTest, method=self.DetectionMethod.value)
-                    predPos = self.predict(posTest, method=self.DetectionMethod.value)
-
-                
-                    fp = (predNeg.sum())/float(predNeg.size); cfp[i] = fp
-                    fn = (predPos.size - predPos.sum())/float(predPos.size); cfn[i] = fn
-                    
-                    prec = predPos.sum()/float(predPos.sum()+predNeg.sum()); cprec[i] = prec
-                    recall = 1-fn; crec[i] = recall
-                
-                    logger.debug(" Finished training. Results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
-                    templogfile.write(str(fp)+" "+str(fn)+" "+str(1-fn)+" "+str(prec)+"\n")
-                
-                fp = np.mean(cfp)
-                fn = np.mean(cfn)
-                recall = np.mean(crec)
-                prec = np.mean(cprec)
-                logger.info(" Finished training. Averaged results of cross validation: FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
-                logger.info(" Wrote training results to '{}'.".format(templogfile.name))
-        else:
-            logger.debug("Starting training with {} negative patches and {} positive patches...".format( len(neg), len(pos)))
-            self._felzenszwalbTraining(neg, pos)
-            logger.debug("Finished training.")
-            
         OpDetectMissing._needsTraining = False
-            
-        
-            
+
     def _felzenszwalbTraining(self, negative, positive):
         '''
         we want to train on a 'hard' subset of the training data, see
         FELZENSZWALB ET AL.: OBJECT DETECTION WITH DISCRIMINATIVELY TRAINED PART-BASED MODELS (4.4), PAMI 32/9
         '''
-        
+
         #TODO sanity checks
-        
+
         n = (self.PatchSize.value + self.HaloSize.value)**2
         method = self.DetectionMethod.value
 
@@ -300,52 +263,58 @@ class OpDetectMissing(Operator):
         nTrainingSteps = self._felzenOpts["nTrainingSteps"]
 
         # initial choice of training samples
-        (initNegative,choiceNegative, _, _) = _chooseRandomSubset(negative, min(firstSamples, len(negative)))
-        (initPositive,choicePositive, _, _) = _chooseRandomSubset(positive, min(firstSamples, len(positive)))
-        
+        (initNegative, choiceNegative, _, _) = \
+            _chooseRandomSubset(negative, min(firstSamples, len(negative)))
+        (initPositive, choicePositive, _, _) = \
+            _chooseRandomSubset(positive, min(firstSamples, len(positive)))
+
         # setup for parallel training
-        samples = [negative,positive]
+        samples = [negative, positive]
         choice = [choiceNegative, choicePositive]
         S_t = [initNegative, initPositive]
-        
+
         finished = [False, False]
-        
+
         ### BEGIN SUBROUTINE ###
         def felzenstep(x, cache, ind):
-            
-            case = ("positive" if ind>0 else "negative") + " set"
+
+            case = ("positive" if ind > 0 else "negative") + " set"
             pred = self.predict(x, method=method)
-            
+
             hard = np.where(pred != ind)[0]
             easy = np.setdiff1d(range(len(x)), hard)
-            logger.debug(" {}: currently {} hard and {} easy samples".format(\
+            logger.debug(" {}: currently {} hard and {} easy samples".format(
                 case, len(hard), len(easy)))
 
             # shrink the cache
-            easyInCache = np.intersect1d(easy, cache) if len(easy)>0 else []
-            if len(easyInCache)>10: #FIXME arbitrary
-                (removeFromCache, _, _, _) = _chooseRandomSubset(easyInCache, min(len(easyInCache), maxRemovePerStep))
+            easyInCache = np.intersect1d(easy, cache) if len(easy) > 0 else []
+            if len(easyInCache) > 0:
+                (removeFromCache, _, _, _) = _chooseRandomSubset(
+                    easyInCache, min(len(easyInCache), maxRemovePerStep))
                 cache = np.setdiff1d(cache, removeFromCache)
-                logger.debug(" {}: shrunk the cache by {} elements".format(case, len(removeFromCache)))
-                
+                logger.debug(" {}: shrunk the cache by {} elements".format(
+                    case, len(removeFromCache)))
+
             # grow the cache
             temp = len(cache)
-            addToCache = _chooseRandomSubset(hard, min(len(hard), maxAddPerStep))[0]
+            addToCache = _chooseRandomSubset(
+                hard, min(len(hard), maxAddPerStep))[0]
             cache = np.union1d(cache, addToCache)
             addedHard = len(cache)-temp
-            logger.debug(" {}: grown the cache by {} elements".format(case, addedHard))
-            
+            logger.debug(" {}: grown the cache by {} elements".format(
+                case, addedHard))
+
             if len(cache) > maxSamples:
-                logger.debug(" {}: Cache to big, removing elements.".format(case))
-                (cache,_,_,_) = _chooseRandomSubset(cache, maxSamples)
-            
+                logger.debug(
+                    " {}: Cache to big, removing elements.".format(case))
+                cache = _chooseRandomSubset(cache, maxSamples)[0]
+
             # apply the cache
             C = x[cache]
-            #logger.debug(" {}: expanded set to {} elements".format(case, len(C)))
-            
-            return (C,cache,addedHard==0)
+
+            return (C, cache, addedHard == 0)
         ### END SUBROUTINE ###
-        
+
         ### BEGIN PARALLELIZATION FUNCTION ###
         def partFun(i):
             (C, newChoice, newFinished) = felzenstep(samples[i], choice[i], i)
@@ -353,79 +322,87 @@ class OpDetectMissing(Operator):
             choice[i] = newChoice
             finished[i] = newFinished
         ### END PARALLELIZATION FUNCTION ###
-        
-        for k in range(nTrainingSteps): #just count iterations
 
-            logger.debug("Felzenszwalb Training (step {}/{}): {} hard negative samples, {} hard positive samples.".format(k+1,nTrainingSteps, len(S_t[0]), len(S_t[1])))
+        for k in range(nTrainingSteps):
+
+            logger.debug(
+                "Felzenszwalb Training " +
+                "(step {}/{}): {} hard negative samples, {}".format(
+                    k+1, nTrainingSteps, len(S_t[0]), len(S_t[1])) +
+                "hard positive samples.")
             self.fit(S_t[0], S_t[1], method=method)
-            
+
             pool = RequestPool()
 
             for i in range(len(S_t)):
                 req = Request(partial(partFun, i))
                 pool.add(req)
-            
+
             pool.wait()
             pool.clean()
-            
-            if np.all(finished): 
+
+            if np.all(finished):
                 #already have all hard examples in training set
                 break
 
         self.fit(S_t[0], S_t[1], method=method)
-        
+
         logger.debug(" Finished Felzenszwalb Training.")
-        
-        
+
     #####################
     ### CLASS METHODS ###
     #####################
-    
+
     @classmethod
     def fit(cls, negative, positive, method='classic'):
         '''
         train the underlying SVM
         '''
-        
+
         if cls._manager is None:
             cls._manager = SVMManager()
-        
+
         if method == 'classic' or not havesklearn:
             return
-        
-        assert len(negative.shape) == 2, "Negative training set must have shape (nSamples, nHistogramBins)."
-        assert len(positive.shape) == 2, "Positive training set must have shape (nSamples, nHistogramBins)."
-        
-        assert negative.shape[1] == positive.shape[1], "Negative and positive histograms must have the same number of bins."
+
+        assert len(negative.shape) == 2, \
+            "Negative training set must have shape (nSamples, nHistogramBins)."
+        assert len(positive.shape) == 2, \
+            "Positive training set must have shape (nSamples, nHistogramBins)."
+        assert negative.shape[1] == positive.shape[1], \
+            "Negative and positive histograms must have the same number of bins."
+
         nBins = negative.shape[1]
-        
+
         labels = [0]*len(negative) + [1]*len(positive)
-        samples = np.vstack( (negative,positive) )
-        
-        
+        samples = np.vstack((negative, positive))
+
         if svcTakesScaleC:
-            # old scikit-learn versions take scale_C as a parameter, new ones don't and default to True
+            # old scikit-learn versions take scale_C as a parameter
+            # new ones don't and default to True
             svm = SVC(C=1000, kernel=_histogramIntersectionKernel, scale_C=True)
         else:
             svm = SVC(C=1000, kernel=_histogramIntersectionKernel)
-        
+
         svm.fit(samples, labels)
-        
+
         cls._manager.add(svm, nBins, overwrite=True)
-        
+
     @classmethod
     def predict(cls, X, method='classic'):
         '''
         predict if the histograms in X correspond to missing regions
         do this for subsets of X in parallel
         '''
-        
+
         if cls._manager is None:
             cls._manager = SVMManager()
-            
-        assert len(X.shape) == 2, "Prediction data must have shape (nSamples, nHistogramBins)."
+
+        assert len(X.shape) == 2, \
+            "Prediction data must have shape (nSamples, nHistogramBins)."
+
         nBins = X.shape[1]
-        
+
         if method == 'classic' or not havesklearn:
             svm = PseudoSVC()
         else:
@@ -433,78 +410,75 @@ class OpDetectMissing(Operator):
                 svm = cls._manager.get(nBins)
             except NotTrainedError:
                 # fail gracefully if not trained => responsibility of user!
-                #logger.error("Detector is not trained yet, falling back to default detector.")
                 svm = PseudoSVC()
-            
+
         y = np.zeros((len(X),))*np.nan
-        
+
         pool = RequestPool()
 
-        chunkSize = 1000 #FIXME magic number??
+        chunkSize = 1000  # FIXME magic number??
         nChunks = len(X)/chunkSize + (1 if len(X) % chunkSize > 0 else 0)
-        
-        s = [slice(k*chunkSize,min((k+1)*chunkSize,len(X))) for k in range(nChunks)]
-        
+
+        s = [slice(k*chunkSize,min((k+1)*chunkSize, len(X)))
+             for k in range(nChunks)]
+
         def partFun(i):
             y[s[i]] = svm.predict(X[s[i]])
-        
+
         for i in range(nChunks):
             req = Request(partial(partFun, i))
             pool.add(req)
-        
+
         pool.wait()
         pool.clean()
-        
+
         # not neccessary
         #assert not np.any(np.isnan(y))
         return np.asarray(y)
-    
-    
+
     @classmethod
     def has(cls, n, method='classic'):
-        
+
         if cls._manager is None:
             cls._manager = SVMManager()
-        
+
         if method == 'classic' or not havesklearn:
             return True
         return cls._manager.has(n)
-    
-    
+
     @classmethod
     def reset(cls):
         cls._manager = SVMManager()
         logger.debug("Reset all detectors.")
-    
-    
+
     @classmethod
     def dumps(cls):
-        
+
         if cls._manager is None:
             cls._manager = SVMManager()
-        
+
         return pickle.dumps(cls._manager.extract())
-    
+
     @classmethod
     def loads(cls, s):
-        
+
         if cls._manager is None:
             cls._manager = SVMManager()
-        
+
         if len(s) > 0:
             try:
                 d = pickle.loads(s)
             except Exception as err:
-                logger.error("Failed overlaoding detector due to an error: {}".format(str(err)))
+                logger.error(
+                    "Failed overlaoding detector due to an error: {}".format(
+                        str(err)))
                 return
-            
-            cls._manager.overload(d)
+
             logger.debug("Loaded detector: {}".format(str(cls._manager)))
 
 
-
 #############################
-#############################           
+#############################
 #############################
 ###                       ###
 ###         TOOLS         ###
@@ -513,65 +487,64 @@ class OpDetectMissing(Operator):
 #############################
 #############################
 
-    
+
 class PseudoSVC(object):
     '''
-    pseudo SVM 
+    pseudo SVM
     '''
-    
+
     def __init__(self, *args, **kwargs):
         pass
-    
+
     def fit(self, *args, **kwargs):
         pass
-        
-    def predict(self,*args, **kwargs):
+
+    def predict(self, *args, **kwargs):
         X = args[0]
         out = np.zeros(len(X))
         for k, patch in enumerate(X):
             out[k] = 1 if np.all(patch[1:] == 0) else 0
         return out
-    
-    
 
 
 class SVMManager(object):
     '''
     manages our SVMs for multiple bin numbers
     '''
-    
+
     _svms = None
-    
+
     class NotTrainedError(Exception):
         pass
-    
+
     def __init__(self):
         self._svms = {'version': 1}
-    
+
     def get(self, n):
         try:
             return self._svms[n]
         except KeyError:
-            raise NotTrainedError("Detector for bin size {} not trained.\nHave {}.".format(n, self._svms))
-    
+            raise NotTrainedError(
+                "Detector for bin size {} not trained.\nHave {}.".format(
+                    n, self._svms))
+
     def add(self, svm, n, overwrite=False):
         if not n in self._svms.keys() or overwrite:
             self._svms[n] = svm
-    
+
     def remove(self, n):
         try:
             del self._svms[n]
         except KeyError:
             #don't fail, just complain
             logger.error("Tried removing a detector which is not trained yet.")
-            #raise NotTrainedError("Detector for bin size {} not trained.".format(n))
-    
+
     def has(self, n):
         return n in self._svms
-    
+
     def extract(self):
         return self._svms
-    
+
     def overload(self, obj):
         if 'version' in obj and obj['version'] == self._svms['version']:
             self._svms = obj
@@ -583,89 +556,98 @@ class SVMManager(object):
                         self.add(svm, n, overwrite=True)
             except KeyError:
                 #don't fail, just complain
-                logger.error("Detector overload format not recognized, no detector loaded.")
-                #raise ValueError("Format not recognized.")
-            
+                logger.error(
+                    "Detector overload format not recognized, "
+                    "no detector loaded.")
+
     def __str__(self):
         return str(self._svms)
 
 
 def _chooseRandomSubset(data, n):
     choice = np.random.permutation(len(data))
-    return (data[choice[:n]], choice[:n], data[choice[n:]], choice[n:]) 
+    return (data[choice[:n]], choice[:n], data[choice[n:]], choice[n:])
 
 
 def _patchify(data, patchSize, haloSize):
     '''
     data must be 2D y-x
-    
+
     returns (patches, slices)
     '''
-    
+
     patches = []
     slices = []
-    nPatchesX = data.shape[1]/patchSize + (1 if data.shape[1]%patchSize > 0 else 0)
-    nPatchesY = data.shape[0]/patchSize + (1 if data.shape[0]%patchSize > 0 else 0)
-    
+    nPatchesX = data.shape[1]/patchSize + \
+        (1 if data.shape[1] % patchSize > 0 else 0)
+    nPatchesY = data.shape[0]/patchSize + \
+        (1 if data.shape[0] % patchSize > 0 else 0)
+
     for y in range(nPatchesY):
         for x in range(nPatchesX):
             right = min((x+1)*patchSize + haloSize, data.shape[1])
             bottom = min((y+1)*patchSize + haloSize, data.shape[0])
-            
-            rightIsIncomplete = (x+1)*patchSize>data.shape[1]
-            bottomIsIncomplete = (y+1)*patchSize>data.shape[0]
-            
+
+            rightIsIncomplete = (x+1)*patchSize > data.shape[1]
+            bottomIsIncomplete = (y+1)*patchSize > data.shape[0]
+
             left = max(x*patchSize - haloSize, 0) if not rightIsIncomplete \
                 else max(0, right-patchSize-haloSize)
             top = max(y*patchSize - haloSize, 0) if not bottomIsIncomplete \
                 else max(0, bottom - patchSize - haloSize)
-            
+
             patches.append(data[top:bottom, left:right])
-            
+
             if rightIsIncomplete:
-                horzSlice = slice( max(data.shape[1]-patchSize, 0), data.shape[1])
+                horzSlice = slice(
+                    max(data.shape[1]-patchSize, 0), data.shape[1])
             else:
                 horzSlice = slice(patchSize*x, patchSize*(x+1))
-                    
+
             if bottomIsIncomplete:
-                vertSlice = slice( max(data.shape[0]-patchSize, 0), data.shape[0])
+                vertSlice = slice(
+                    max(data.shape[0]-patchSize, 0), data.shape[0])
             else:
                 vertSlice = slice(patchSize*y, patchSize*(y+1))
-                
-            slices.append( (vertSlice, horzSlice) )
-            
+
+            slices.append((vertSlice, horzSlice))
+
     return (patches, slices)
 
 
-def _histogramIntersectionKernel(X,Y):
+def _histogramIntersectionKernel(X, Y):
     '''
     implements the histogram intersection kernel in a fancy way
     (standard: k(x,y) = sum(min(x_i,y_i)) )
     '''
 
-    A = X.reshape( (X.shape[0],1,X.shape[1]) )
-    B = Y.reshape( (1,) + Y.shape )
-    
-    return np.sum(np.minimum(A,B), axis=2)
+    A = X.reshape((X.shape[0], 1, X.shape[1]))
+    B = Y.reshape((1, ) + Y.shape)
+
+    return np.sum(np.minimum(A, B), axis=2)
 
 
 def _defaultTrainingHistograms():
     '''
     produce a standard training set with black regions
     '''
-    
+
     nHists = 100
     n = _defaultBinSize+1
     hists = np.zeros((nHists, n))
-    
+
     # generate nHists/2 positive sets
     for i in range(nHists/2):
-        (hists[i,:n-1],_) = np.histogram(np.zeros((64,64), dtype=np.uint8), bins=_defaultBinSize, range=(0,255), density=True)
-        hists[i,n-1] = 1
-    
-    for i in range(nHists/2,nHists):
-        (hists[i,:n-1],_) = np.histogram(np.random.random_integers(60,180,(64,64)), bins=_defaultBinSize, range=(0,255), density=True)
-    
+        (hists[i, :n-1], _) = np.histogram(
+            np.zeros((64, 64), dtype=np.uint8), bins=_defaultBinSize,
+            range=(0, 255), density=True)
+        hists[i, n-1] = 1
+
+    for i in range(nHists/2, nHists):
+        (hists[i, :n-1], _) = np.histogram(
+            np.random.random_integers(60, 180, (64, 64)), bins=_defaultBinSize,
+            range=(0, 255), density=True)
+
     return hists
 
 
@@ -673,9 +655,10 @@ def _defaultTrainingHistograms():
 ### HISTOGRAM EXTRACTION FUNCTION ###
 #####################################
 
-def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, intRange=(0,255), appendPositions=False):
+def extractHistograms(volume, labels, patchSize=64, haloSize=0,
+                      nBins=30, intRange=(0, 255), appendPositions=False):
     '''
-    extracts histograms from 3d-volume 
+    extracts histograms from 3d-volume
      - labels are
         0       ignore
         1       positive
@@ -685,27 +668,29 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
      - volume and labels must be 3d, and in order 'zyx' (if not VigraArrays)
      - returns: np.ndarray, shape: (nSamples,nBins+1), last column is the label
     '''
-    
+
     # progress reporter class, histogram extraction can take quite a long time
     class ProgressReporter(object):
-        
+
         lock = None
-        
+
         def __init__(self, nThreads):
             self.lock = ThreadLock()
             self.nThreads = nThreads
             self.status = np.zeros((nThreads,))
-            
-        def report(self,index):
+
+        def report(self, index):
             self.lock.acquire()
             self.status[index] = 1
-            logger.debug("Finished threads: %d/%d." % (self.status.sum(), len(self.status)))
+            logger.debug("Finished threads: %d/%d." %
+                         (self.status.sum(), len(self.status)))
             self.lock.release()
-    
+
     # sanity checks
     assert len(volume.shape) == 3, "Volume must be 3d data"
-    assert volume.shape == labels.shape, "Volume and labels must have the same shape"
-    
+    assert volume.shape == labels.shape,\
+        "Volume and labels must have the same shape"
+
     try:
         volumeZYX = volume.withAxes(*'zyx')
         labelsZYX = labels.withAxes(*'zyx')
@@ -714,60 +699,64 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
         volumeZYX = volume
         labelsZYX = labels
         pass
-    
+
     # compute actual patch size
     patchSize = patchSize + 2*haloSize
-    
-    
+
     # fill list of patch centers (VigraArray does not support bitwise_or)
-    ind_z, ind_y, ind_x = np.where((labelsZYX==1).view(np.ndarray) | (labelsZYX==2).view(np.ndarray))
+    ind_z, ind_y, ind_x = np.where(
+        (labelsZYX == 1).view(np.ndarray) | (labelsZYX == 2).view(np.ndarray))
     index = np.arange(len(ind_z))
 
     # prepare chunking of histogram centers
-    chunkSize = 10000 #FIXME magic number??
+    chunkSize = 10000  # FIXME magic number??
     nChunks = len(index)//chunkSize + (1 if len(index) % chunkSize > 0 else 0)
-    sliceList = [slice(k*chunkSize,min((k+1)*chunkSize,len(index))) for k in range(nChunks)]
+    sliceList = [slice(k*chunkSize, min((k+1)*chunkSize, len(index)))
+                 for k in range(nChunks)]
     histoList = [None]*nChunks
-    
+
     # prepare subroutine for parallel extraction
     reporter = ProgressReporter(nChunks)
-    
+
     #BEGIN subroutine
     def _extractHistogramsSub(itemList):
 
         xs = ind_x[itemList]
         ys = ind_y[itemList]
         zs = ind_z[itemList]
-        
+
         ymin = ys - patchSize//2
         ymax = ymin + patchSize
-        
+
         xmin = xs - patchSize//2
         xmax = xmin + patchSize
-        
-        validPatchIndices = np.where( \
-            np.all( ( ymin>=0,\
-              xmin>=0,\
-              xmax <= volumeZYX.shape[2],\
-              (ymax <= volumeZYX.shape[1]) 
-            ), axis=0 ) )[0]
-        
+
+        validPatchIndices = np.where(
+            np.all(
+                (ymin >= 0,
+                 xmin >= 0,
+                 xmax <= volumeZYX.shape[2],
+                 ymax <= volumeZYX.shape[1]),
+                axis=0))[0]
+
         if appendPositions:
             out = np.zeros((len(validPatchIndices), nBins+4))
         else:
             out = np.zeros((len(validPatchIndices), nBins+1))
-        
+
         for k, patchInd in enumerate(validPatchIndices):
             x = xs[patchInd]
             y = ys[patchInd]
             z = zs[patchInd]
-            
-            vol = volumeZYX[z, ymin[patchInd]:ymax[patchInd], xmin[patchInd]:xmax[patchInd]]
-            (out[k,:nBins], _) = np.histogram(vol, bins=nBins, range=intRange, density = True)
-            out[k,nBins] = 1 if labelsZYX[z,y,x] == 1 else 0
+
+            vol = volumeZYX[z, ymin[patchInd]:ymax[patchInd],
+                            xmin[patchInd]:xmax[patchInd]]
+            (out[k, :nBins], _) = np.histogram(
+                vol, bins=nBins, range=intRange, density=True)
+            out[k, nBins] = 1 if labelsZYX[z, y, x] == 1 else 0
             if appendPositions:
-                out[k,nBins+1:] = [z,y,x]
-            
+                out[k, nBins+1:] = [z, y, x]
+
         return out
 
     def partFun(i):
@@ -777,23 +766,22 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
 
         reporter.report(i)
     #END subroutine
-    
+
     # pool the extraction requests
     pool = RequestPool()
-    
+
     for i in range(nChunks):
         req = Request(partial(partFun, i))
         pool.add(req)
-    
+
     pool.wait()
     pool.clean()
 
     return np.vstack(histoList)
 
 
-
 ############################
-############################           
+############################
 ############################
 ###                      ###
 ###         MAIN         ###
@@ -802,20 +790,18 @@ def extractHistograms(volume, labels, patchSize = 64, haloSize = 0, nBins=30, in
 ############################
 ############################
 
-
-
-
 def toH5(data, pathOrGroup, pathInFile, compression=None):
     try:
-        return vigra.impex.writeHDF5(data, pathOrGroup, pathInFile, compression)
+        return vigra.impex.writeHDF5(
+            data, pathOrGroup, pathInFile, compression)
     except TypeError:
         # old vigra does not support compression
-        logger.debug("'compression' argument not supported by vigra (pull request ukoethe/vigra#147 probably still pending).")
+        logger.debug("'compression' argument not yet supported by vigra.")
         return vigra.impex.writeHDF5(data, pathOrGroup, pathInFile)
 
 
 if __name__ == "__main__":
-    
+
     import argparse
     import os.path
     from sys import exit
@@ -824,7 +810,6 @@ if __name__ == "__main__":
 
     from lazyflow.graph import Graph
 
-
     logging.basicConfig()
     logger.setLevel(logging.INFO)
 
@@ -832,33 +817,47 @@ if __name__ == "__main__":
 
     # BEGIN ARGPARSE
 
-    parser = argparse.ArgumentParser(description='Train a missing slice detector'+ 
-                                     """
-                                     Example invocation:
-                                     python2 opDetectMissingData.py block1_test.h5 block1_testLabels.h5 --patch 64 --halo 32 --bins 30 -d ~/testing/2013_08_16 -t 9-12 --opts 200,0,400,1000,2 --shape "(1024,1024,14)"
-                                     """)
+    parser = argparse.ArgumentParser(
+        description='Train a missing slice detector'+
+        """
+        Example invocation:
+        python2 opDetectMissingData.py block1_test.h5 block1_testLabels.h5 --patch 64 --halo 32 --bins 30 -d ~/testing/2013_08_16 -t 9-12 --opts 200,0,400,1000,2 --shape "(1024,1024,14)"
+        """)
 
-    parser.add_argument('file', nargs='*', action='store', \
+    parser.add_argument(
+        'file', nargs='*', action='store',
         help="volume and labels (if omitted, the working directory must contain histogram files)")
 
-    parser.add_argument('-d', '--directory', dest='directory', action='store', default="/tmp",\
+    parser.add_argument(
+        '-d', '--directory', dest='directory', action='store', default="/tmp",
         help='working directory, histograms and detector file will be stored there')
 
-    parser.add_argument('-t', '--testingrange', dest='testingrange', action='store', default=None,\
+    parser.add_argument(
+        '-t', '--testingrange', dest='testingrange', action='store', default=None,
         help='the z range of the labels that are for testing (like "0-3,11,17-19" which would evaluate to [0,1,2,3,11,17,18,19])')
 
-    parser.add_argument('-f', '--force', dest='force', action='store_true', default=False, \
+    parser.add_argument(
+        '-f', '--force', dest='force', action='store_true', default=False,
         help='force extraction of histograms, even if the directory already contains histograms')
 
-    parser.add_argument('--patch', dest='patchSize', action='store', default='64', help='patch size (e.g.: "32,64-128")')
-    parser.add_argument('--halo', dest='haloSize', action='store', default='64', help='halo size (e.g.: "32,64-128")')
-    parser.add_argument('--bins', dest='binSize', action='store', default='30', help='number of histogram bins (e.g.: "10-15,20")')
+    parser.add_argument(
+        '--patch', dest='patchSize', action='store', default='64',
+        help='patch size (e.g.: "32,64-128")')
+    parser.add_argument(
+        '--halo', dest='haloSize', action='store', default='64',
+        help='halo size (e.g.: "32,64-128")')
+    parser.add_argument(
+        '--bins', dest='binSize', action='store', default='30',
+        help='number of histogram bins (e.g.: "10-15,20")')
 
-    parser.add_argument('--shape', dest='shape', action='store', default=None, help='shape of the volume in tuple notation "(x,y,z)" (only neccessary if loading histograms from file)')
+    parser.add_argument(
+        '--shape', dest='shape', action='store', default=None, 
+        help='shape of the volume in tuple notation "(x,y,z)" (only neccessary if loading histograms from file)')
 
-    parser.add_argument('--opts', dest='opts', action='store', default='250,0,250,1000,4', \
-        help='<initial number of samples>,<maximum number of samples removed per step>,<maximum number of samples added per step>,'+ \
-            '<maximum number of samples>,<number of steps> (e.g. 250,0,250,1000,4)')
+    parser.add_argument(
+        '--opts', dest='opts', action='store', default='250,0,250,1000,4',
+        help='<initial number of samples>,<maximum number of samples removed per step>,<maximum number of samples added per step>,' +
+        '<maximum number of samples>,<number of steps> (e.g. 250,0,250,1000,4)')
 
     args = parser.parse_args()
 
@@ -867,8 +866,10 @@ if __name__ == "__main__":
     # BEGIN FILESYSTEM
 
     workingdir = args.directory
-    assert os.path.isdir(workingdir), "Directory '{}' does not exist.".format(workingdir)
-    for f in args.file: assert os.path.isfile(f), "'{}' does not exist.".format(f)
+    assert os.path.isdir(workingdir), \
+        "Directory '{}' does not exist.".format(workingdir)
+    for f in args.file:
+        assert os.path.isfile(f), "'{}' does not exist.".format(f)
 
     # END FILESYSTEM
 
@@ -880,10 +881,11 @@ if __name__ == "__main__":
             expandedRanges = []
             for r in singleRanges:
                 r2 = r.split('-')
-                if len(r2)==1:
+                if len(r2) == 1:
                     expandedRanges.append(int(r))
                 elif len(r2) == 2:
-                    for i in range(int(r2[0]),int(r2[1])+1): expandedRanges.append(i)
+                    for i in range(int(r2[0]), int(r2[1])+1):
+                        expandedRanges.append(i)
                 else:
                     logger.error("Syntax Error: '{}'".format(r))
                     exit(33)
@@ -900,44 +902,60 @@ if __name__ == "__main__":
     try:
         opts = [int(opt) for opt in args.opts.split(",")]
         assert len(opts) == 5
-        opts = dict(zip(["firstSamples", "maxRemovePerStep", "maxAddPerStep",\
-            "maxSamples", "nTrainingSteps"], opts))
+        opts = dict(zip(
+            ["firstSamples", "maxRemovePerStep", "maxAddPerStep",
+             "maxSamples", "nTrainingSteps"], opts))
     except:
-        raise ValueError("Cannot parse '--opts' argument '{}'".format(args.opts))
+        raise ValueError(
+            "Cannot parse '--opts' argument '{}'".format(args.opts))
 
     # END NORMALIZE
- 
-    csvfile = open(os.path.join(workingdir, "%s_test_results.tsv" % (thisTime,)), 'w')
-    csvwriter = csv.DictWriter(csvfile, fieldnames=("patch", "halo", "bins", "recall", "precision"), delimiter=' ', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+
+    csvfile = open(os.path.join(
+        workingdir, "%s_test_results.tsv" % (thisTime,)), 'w')
+    csvwriter = csv.DictWriter(
+        csvfile, fieldnames=("patch", "halo", "bins", "recall", "precision"),
+        delimiter=' ', quotechar='"', quoting=csv.QUOTE_MINIMAL)
     csvwriter.writeheader()
 
     op = OpDetectMissing(graph=Graph())
     op._felzenOpts = opts
 
-    logger.info("Starting training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+    logger.info("Starting training script ({})".format(
+        time.strftime("%Y-%m-%d %H:%M")))
     t_start = time.time()
 
     # iterate training conditions
     for patchSize in patchSizes:
         for haloSize in haloSizes:
             for binSize in binSizes:
-                #FIXME optimize for already computed patch sizes ( (64,0) vs. (32,16) )
-                histfile = os.path.join(workingdir, "histograms_%d_%d_%d.h5" % (patchSize, haloSize, binSize))
-                detfile = os.path.join(workingdir, "%s_detector_%d_%d_%d.pkl" % (thisTime, patchSize, haloSize, binSize))
-                predfile = os.path.join(workingdir, "%s_prediction_results_%d_%d_%d.h5" % (thisTime, patchSize, haloSize, binSize))
+
+                histfile = os.path.join(
+                    workingdir,
+                    "histograms_%d_%d_%d.h5" % (patchSize, haloSize, binSize))
+                detfile = os.path.join(
+                    workingdir,
+                    "%s_detector_%d_%d_%d.pkl" % (
+                        thisTime, patchSize, haloSize, binSize))
+                predfile = os.path.join(
+                    workingdir,
+                    "%s_prediction_results_%d_%d_%d.h5" % (
+                        thisTime, patchSize, haloSize, binSize))
 
                 startFromLabels = args.force or not os.path.exists(histfile)
-                
+
                 # EXTRACT HISTOGRAMS
                 if startFromLabels:
-                    logger.info("Gathering histograms from {} patches (this could take a while) ...".format((patchSize, haloSize, binSize)))
-                    assert len(args.file) == 2, "If there are no histograms available, volume and labels must be provided."
-                    
+                    logger.info("Gathering histograms from {} patches (this could take a while) ...".format(
+                        (patchSize, haloSize, binSize)))
+                    assert len(args.file) == 2, \
+                        "If there are no histograms available, volume and labels must be provided."
+
                     locs = ['/volume/data', '/cube']
-                    
+
                     volume = None
                     labels = None
-                    
+
                     for l in locs:
                         try:
                             volume = vigra.impex.readHDF5(args.file[0], l).withAxes(*'zyx')
@@ -945,145 +963,188 @@ if __name__ == "__main__":
                         except KeyError:
                             pass
                     if volume is None:
-                        logger.error("Could not find a volume in {} with paths {}".format(args.file[0], locs))
+                        logger.error(
+                            "Could not find a volume in {} with paths {}".format(
+                                args.file[0], locs))
                         csvfile.close()
                         exit(42)
-                        
+
                     for l in locs:
                         try:
-                            labels = vigra.impex.readHDF5(args.file[1], '/volume/data').withAxes(*'zyx')
+                            labels = vigra.impex.readHDF5(
+                                args.file[1], '/volume/data').withAxes(*'zyx')
                             break
                         except KeyError:
                             pass
                     if labels is None:
-                        logger.error("Could not find a volume in {} with paths {}".format(args.file[1], locs))
+                        logger.error(
+                            "Could not find a volume in {} with paths {}".format(
+                                args.file[1], locs))
                         csvfile.close()
                         exit(43)
-                    
+
                     volShape = volume.shape
-                    
-                    # bear with me, complicated axistags stuff is for my old vigra to work
-                    trainrange = np.setdiff1d(np.arange(volume.shape[0]), testrange)
-                    
-                    trainData = vigra.taggedView(volume[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-                    trainLabels = vigra.taggedView(labels[trainrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-                    
-                    trainHistograms = extractHistograms(trainData, trainLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255), appendPositions=True)
-                    
-                    if len(testrange)>0:
-                        testData = vigra.taggedView(volume[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-                        testLabels = vigra.taggedView(labels[testrange,:,:], axistags=vigra.defaultAxistags('zyx'))
-                        
-                        testHistograms = extractHistograms(testData, testLabels, patchSize = patchSize, haloSize=haloSize, nBins=binSize, intRange=(0,255), appendPositions=True)
+
+                    # bear with me, complicated axistags stuff is neccessary
+                    # for my old vigra to work
+                    trainrange = np.setdiff1d(
+                        np.arange(volume.shape[0]), testrange)
+
+                    trainData = vigra.taggedView(
+                        volume[trainrange, :, :],
+                        axistags=vigra.defaultAxistags('zyx'))
+                    trainLabels = vigra.taggedView(
+                        labels[trainrange, :, :],
+                        axistags=vigra.defaultAxistags('zyx'))
+
+                    trainHistograms = extractHistograms(
+                        trainData, trainLabels, patchSize=patchSize,
+                        haloSize=haloSize, nBins=binSize, intRange=(0, 255),
+                        appendPositions=True)
+
+                    if len(testrange) > 0:
+                        testData = vigra.taggedView(
+                            volume[testrange, :, :],
+                            axistags=vigra.defaultAxistags('zyx'))
+                        testLabels = vigra.taggedView(
+                            labels[testrange, :, :],
+                            axistags=vigra.defaultAxistags('zyx'))
+
+                        testHistograms = extractHistograms(
+                            testData, testLabels, patchSize=patchSize,
+                            haloSize=haloSize, nBins=binSize,
+                            intRange=(0, 255), appendPositions=True)
                     else:
-                        testHistograms = np.zeros((0,trainHistograms.shape[1]))
-                    
-                    
-                    vigra.impex.writeHDF5(trainHistograms, histfile, '/volume/train')
-                    if len(testHistograms)>0:
-                        vigra.impex.writeHDF5(testHistograms, histfile, '/volume/test')
+                        testHistograms = np.zeros(
+                            (0, trainHistograms.shape[1]))
+
+                    vigra.impex.writeHDF5(
+                        trainHistograms, histfile, '/volume/train')
+                    if len(testHistograms) > 0:
+                        vigra.impex.writeHDF5(
+                            testHistograms, histfile, '/volume/test')
                     logger.info("Dumped histograms to '{}'.".format(histfile))
-                    
+
                 else:
                     logger.info("Gathering histograms from file...")
-                    trainHistograms = vigra.impex.readHDF5(histfile, '/volume/train')
+                    trainHistograms = vigra.impex.readHDF5(
+                        histfile, '/volume/train')
                     try:
-                        testHistograms =  vigra.impex.readHDF5(histfile, '/volume/test')
+                        testHistograms = vigra.impex.readHDF5(
+                            histfile, '/volume/test')
                     except KeyError:
-                        testHistograms = np.zeros((0,trainHistograms.shape[1]))
-                    logger.info("Loaded histograms from '{}'.".format(histfile))
+                        testHistograms = np.zeros(
+                            (0, trainHistograms.shape[1]))
+                    logger.info("Loaded histograms from '{}'.".format(
+                        histfile))
 
                     assert trainHistograms.shape[1] == binSize+4
                     assert testHistograms.shape[1] == binSize+4
-                    
-                    if len(testHistograms)>0:
+
+                    if len(testHistograms) > 0:
                         if args.shape is None:
-                            logger.warning("Guessing the shape of the original data...")
-                            volShape = (512,1024,1024,1,1)
+                            logger.warning(
+                                "Guessing the shape of the original data...")
+                            volShape = (1024, 1024, 512, )
                         else:
                             volShape = eval(args.shape)
-                            assert isinstance(volShape, tuple) and len(volShape)==3
-                            
-                        
+                            assert isinstance(volShape, tuple) \
+                                and len(volShape) == 3
 
-                                
-                    
                     assert not np.any(np.isinf(trainHistograms))
                     assert not np.any(np.isnan(trainHistograms))
-                    
+
                     assert not np.any(np.isinf(testHistograms))
                     assert not np.any(np.isnan(testHistograms))
-                    
+
                 # TRAIN
-            
+
                 logger.info("Training...")
-                
+
                 op.PatchSize.setValue(patchSize)
                 op.HaloSize.setValue(haloSize)
                 op.DetectionMethod.setValue('svm')
                 op.NHistogramBins.setValue(binSize)
-                
-                op.TrainingHistograms.setValue(trainHistograms[:,:binSize+1])
-                
+
+                op.TrainingHistograms.setValue(trainHistograms[:, :binSize+1])
+
                 op.train(force=True)
-                
+
                 # save detector
                 try:
                     if detfile is None:
-                        with tempfile.NamedTemporaryFile(suffix='.pkl', prefix='detector_', delete=False) as f:
-                            logger.info("Detector written to {}".format(f.name))
+                        with tempfile.NamedTemporaryFile(
+                                suffix='.pkl', prefix='detector_',
+                                delete=False) as f:
                             f.write(op.dumps())
                     else:
-                        with open(detfile,'w') as f:
-                            logger.info("Detector written to {}".format(f.name))
+                        with open(detfile, 'w') as f:
+                            logger.info(
+                                "Detector written to {}".format(f.name))
                             f.write(op.dumps())
+
+                    logger.info(
+                        "Detector written to {}".format(f.name))
                 except Exception as e:
                     print("==== BEGIN DETECTOR DUMP ====")
                     print(op.dumps())
                     print("==== END DETECTOR DUMP ====")
                     logger.error(str(e))
-                    
-                
+
                 if len(testHistograms) == 0:
                     # no testing required
                     continue
-                
-                logger.info("Testing...")
-                
-                # split into histos, positions and labels
-                hists = testHistograms[:,:binSize]
-                labels = testHistograms[:,binSize]
-                zyxPos = testHistograms[:,binSize+1:]
-                
-                pred = op.predict(hists, method='svm')
-                predNeg = pred[np.where(labels==0)[0]]
-                predPos = pred[np.where(labels==1)[0]]
 
-                fp = (predNeg.sum())/float(predNeg.size); 
+                logger.info("Testing...")
+
+                # split into histos, positions and labels
+                hists = testHistograms[:, :binSize]
+                labels = testHistograms[:, binSize]
+                zyxPos = testHistograms[:, binSize+1:]
+
+                pred = op.predict(hists, method='svm')
+                predNeg = pred[np.where(labels == 0)[0]]
+                predPos = pred[np.where(labels == 1)[0]]
+
+                fp = (predNeg.sum())/float(predNeg.size)
                 fn = (predPos.size - predPos.sum())/float(predPos.size)
 
                 prec = predPos.sum()/float(predPos.sum()+predNeg.sum())
                 recall = 1-fn
-                
-                logger.info(" Predicted {} histograms with patchSize={}, haloSize={}, bins={}.".format(len(hists), patchSize, haloSize, binSize))
-                logger.info(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." % (fp, fn, recall, prec))
-                csvwriter.writerow({'patch': patchSize, 'halo': haloSize, 'bins': binSize, 'recall': recall, 'precision': prec})
 
+                logger.info(
+                    " Predicted {} histograms with patchSize={}, haloSize={}, bins={}.".format(
+                        len(hists), patchSize, haloSize, binSize))
+                logger.info(" FPR=%.5f, FNR=%.5f (recall=%.5f, precision=%.5f)." %\
+                            (fp, fn, recall, prec))
+                csvwriter.writerow(
+                    {'patch': patchSize, 'halo': haloSize,
+                     'bins': binSize, 'recall': recall, 'precision': prec})
 
                 logger.info("Writing prediction volume...")
 
-                predVol = vigra.VigraArray(np.zeros(volShape, dtype=np.uint8), axistags=vigra.defaultAxistags('xyz')).withAxes(*'zyx')
+                predVol = vigra.VigraArray(
+                    np.zeros(volShape, dtype=np.uint8),
+                    axistags=vigra.defaultAxistags('xyz')).withAxes(*'zyx')
 
                 for i, p in enumerate(pred):
-                    predVol[testrange[zyxPos[i][0]], zyxPos[i][1], zyxPos[i][2]] = p
+                    predVol[
+                        testrange[zyxPos[i][0]], zyxPos[i][1], zyxPos[i][2]
+                        ] = p
 
                 toH5(predVol, predfile, '/volume/data', compression="GZIP")
 
-    logger.info("Finished training script ({})".format(time.strftime("%Y-%m-%d %H:%M")))
+    logger.info(
+        "Finished training script ({})".format(
+            time.strftime("%Y-%m-%d %H:%M")))
+
     t_stop = time.time()
-    
-    logger.info("Duration: {}".format(time.strftime("%Hh, %Mm, %Ss", time.gmtime( (t_stop-t_start)%(24*60*60) ))))
-    if (t_stop-t_start) >= 24*60*60: logger.info( " and %d days!" % int(t_stop-t_start)//(24*60*60) )
-    
+
+    logger.info("Duration: {}".format(
+        time.strftime(
+            "%Hh, %Mm, %Ss", time.gmtime((t_stop-t_start) % (24*60*60)))))
+    if (t_stop-t_start) >= 24*60*60:
+        logger.info(" and %d days!" % int(t_stop-t_start)//(24*60*60))
+
     csvfile.close()
 
