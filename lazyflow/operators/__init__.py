@@ -45,6 +45,7 @@ except:
     from opSelectLabel import OpSelectLabel
     from opMaskedSelect import OpMaskedSelect
     from opReorderAxes import OpReorderAxes
+    from opBlockedConnectedComponents import OpBlockedConnectedComponents
 
     ops = list(itersubclasses(Operator))
     '''
