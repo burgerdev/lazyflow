@@ -15,10 +15,10 @@ from lazyflow.operators import OpCompressedCache, OpReorderAxes
 try:
     import blockedarray
 except ImportError as e:
-    _importFailed = True
+    module_available = False
     _importMsg = str(e)
 else:
-    _importFailed = False
+    module_available = True
 
 
 # This operator takes a (possibly blocked) input image and produces a label
@@ -27,7 +27,7 @@ else:
 # compressed data.
 #
 # Caveats:
-#   - input must be of dimension 3 and of type uint8  #FIXME
+#   - input must be of type uint8  #FIXME
 #   - block shape must divide volume shape evenly
 class OpBlockedConnectedComponents(Operator):
 
@@ -36,15 +36,15 @@ class OpBlockedConnectedComponents(Operator):
     # Must be a list: one for each channel of the volume. #TODO implement
     BackgroundLabels = InputSlot(optional=True) 
 
-    # Blockshape as array with 3 elements (regardless of number of input axes)
-    # If not provided, the volume is blocked heuristically #TODO implement
+    # Blockshape as array with 3 elements (xyz, regardless of number of input 
+    # axes). If not provided, the volume is blocked heuristically #TODO implement
     BlockShape = InputSlot(optional=True)
 
     Output = OutputSlot()
 
     def __init__(self, *args, **kwargs):
         super(OpBlockedConnectedComponents, self).__init__(*args, **kwargs)
-        if _importFailed:
+        if not module_available:
             raise ImportError("Importing module 'blockedarray' failed:\n"
                               "{}".format(_importMsg))
 
@@ -67,8 +67,6 @@ class OpBlockedConnectedComponents(Operator):
     def setupOutputs(self):
         assert self.Input.meta.dtype == np.uint8,\
             "Only 3d UInt8 images supported"
-        assert len(self.Input.meta.shape) == 3,\
-            "Only 3d UInt8 images supported"
 
         self.Output.meta.assignFrom(self.Input.meta)
         self.Output.meta.dtype = np.uint32
@@ -78,13 +76,17 @@ class OpBlockedConnectedComponents(Operator):
             self._blockshape = self.BlockShape.value
         else:
             self._blockshape = self.Input.meta.shape
-        assert len(self._blockshape) == len(self.Input.meta.shape),\
-            "BlockShape is incompatible with Input"
+        assert len(self._blockshape) == 3,\
+            "BlockShape must have size 3"
 
         # propagate blockShape to cache
         self._cache.BlockShape.setValue(
             np.concatenate(
                 (self._blockshape, np.asarray((1, 1)))))
+
+        shape = self._op5.Output.meta.shape
+        for s, t in zip(shape[:3], self._blockshape):
+            assert s % t == 0, "Block shape has to divide volume shape evenly"
 
         #FIXME disconnect??
         op5 = OpReorderAxes(parent=self)
@@ -144,57 +146,60 @@ class OpBlockedConnectedComponents(Operator):
         pool.clean()
 
 
-class _Source(blockedarray.adapters.SourceABC):
-    def __init__(self, slot, blockShape, c, t):
-        super(_Source, self).__init__()
-        self._slot = slot
-        self._blockShape = blockShape
-        self._p = np.asarray(slot.meta.shape[0:3], dtype=np.long)*0
-        self._q = np.asarray(slot.meta.shape[0:3], dtype=np.long)
-        self._c = c
-        self._t = t
+if module_available:
 
-    def pySetRoi(self, roi):
-        assert len(roi) == 2
-        self._p = np.asarray(roi[0], dtype=np.long)
-        self._q = np.asarray(roi[1], dtype=np.long)
+    class _Source(blockedarray.adapters.SourceABC):
+        def __init__(self, slot, blockShape, c, t):
+            super(_Source, self).__init__()
+            self._slot = slot
+            self._blockShape = blockShape
+            self._p = np.asarray(slot.meta.shape[0:3], dtype=np.long)*0
+            self._q = np.asarray(slot.meta.shape[0:3], dtype=np.long)
+            self._c = c
+            self._t = t
 
-    def pyShape(self):
-        return self._slot.meta.shape[0:3]
+        def pySetRoi(self, roi):
+            assert len(roi) == 2
+            self._p = np.asarray(roi[0], dtype=np.long)
+            self._q = np.asarray(roi[1], dtype=np.long)
 
-    def pyReadBlock(self, roi, output):
-        assert len(roi) == 2
-        roiP = np.asarray(roi[0])
-        roiQ = np.asarray(roi[1])
-        p = self._p + roiP
-        q = p + roiQ - roiP
-        if np.any(q > self._q):
-            raise IndexError("Requested roi is too large for selected "
-                             "roi (previous call to setRoi)")
-        p = np.concatenate((p, np.asarray((self._c, self._t))))
-        q = np.concatenate((q, np.asarray((self._c+1, self._t+1))))
-        sub = SubRegion(self._slot, start=p, stop=q)
-        req = self._slot.get(sub)
-        req.writeInto(
-            vigra.taggedView(output, axistags='xyz').withAxes(*'xyzct'))
-        req.block()
-        return True
+        def pyShape(self):
+            return self._slot.meta.shape[0:3]
 
+        def pyReadBlock(self, roi, output):
+            assert len(roi) == 2
+            roiP = np.asarray(roi[0])
+            roiQ = np.asarray(roi[1])
+            p = self._p + roiP
+            q = p + roiQ - roiP
+            if np.any(q > self._q):
+                raise IndexError("Requested roi is too large for selected "
+                                "roi (previous call to setRoi)")
+            p = np.concatenate((p, np.asarray((self._c, self._t))))
+            q = np.concatenate((q, np.asarray((self._c+1, self._t+1))))
+            sub = SubRegion(self._slot, start=p, stop=q)
+            req = self._slot.get(sub)
+            req.writeInto(
+                vigra.taggedView(output, axistags='xyz').withAxes(*'xyzct'))
+            req.block()
+            return True
 
-class _Sink(blockedarray.adapters.SinkABC):
-    def __init__(self, op, c, t):
-        super(_Sink, self).__init__()
-        self._op = op
-        self._c = c
-        self._t = t
+    class _Sink(blockedarray.adapters.SinkABC):
+        def __init__(self, op, c, t):
+            super(_Sink, self).__init__()
+            self._op = op
+            self._c = c
+            self._t = t
 
-    def pyWriteBlock(self, roi, block):
-        assert len(roi) == 2
-        start = roi[0]+[self._c, self._t]
-        stop = roi[1]+[self._c+1, self._t+1]
-        sub = SubRegion(self._op.Input, start=start, stop=stop)
-        block = vigra.taggedView(block, axistags='xyz').withAxes(*'xyzct')
-        self._op.setInSlot(self._op.Input, (), sub, block)
+        def pyWriteBlock(self, roi, block):
+            assert len(roi) == 2
+            start = roi[0]+[self._c, self._t]
+            stop = roi[1]+[self._c+1, self._t+1]
+            sub = SubRegion(self._op.Input, start=start, stop=stop)
+            print(roi)
+            block = vigra.taggedView(block, axistags='xyz').withAxes(*'xyzct')
+            print(block.shape)
+            self._op.setInSlot(self._op.Input, (), sub, block)
 
 
 class _PseudoOperator(Operator):
