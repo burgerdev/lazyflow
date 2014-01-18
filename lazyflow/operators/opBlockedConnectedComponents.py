@@ -123,7 +123,7 @@ class OpBlockedConnectedComponents(Operator):
         #pass
 
     def _computeCC(self):
-        blockShape = self._blockshape
+        blockShape = tuple(self._blockshape)
         pool = RequestPool()
         shape5d = self._op5.Output.meta.shape
 
@@ -164,7 +164,7 @@ if module_available:
             self._q = np.asarray(roi[1], dtype=np.long)
 
         def pyShape(self):
-            return self._slot.meta.shape[0:3]
+            return tuple(self._slot.meta.shape[0:3])
 
         def pyReadBlock(self, roi, output):
             assert len(roi) == 2

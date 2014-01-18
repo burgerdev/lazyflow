@@ -85,3 +85,25 @@ class TestOpConnectedComponents(unittest.TestCase):
 class TestOpConnectedComponentsBlocked(TestOpConnectedComponents):
     def setUp(self):
         OpConnectedComponents.useBlocking = True
+
+
+class TestMisc(unittest.TestCase):
+    def setUp(self):
+        pass
+
+    def testFactorize(self):
+        from lazyflow.operators.opConnectedComponents import _factorize
+        f = [2, 7, 17]
+        n = np.prod(f)
+        g = _factorize(n)
+        for i in f:
+            assert i in g, "{} vs. {}".format(f,g)
+    
+    def testCombine(self):
+        from lazyflow.operators.opConnectedComponents import _combine
+        f = _combine([2, 7, 17])
+        g = [2, 7, 17, 14, 34, 119, 238]
+        for i in g:
+            assert i in f, "{} vs. {}".format(f,g)
+        
+    
