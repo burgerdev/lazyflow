@@ -6,14 +6,13 @@ import vigra
 from numpy.testing import assert_almost_equal
 
 from lazyflow.operators import OpConnectedComponents
-from lazyflow.operators.opBlockedConnectedComponents import\
-    module_available as blocked_available
+from lazyflow.operators import OpBlockedConnectedComponents
 from lazyflow.graph import Graph
 
 
 class TestOpConnectedComponents(unittest.TestCase):
     def setUp(self):
-        OpConnectedComponents.useBlocking = False
+        self.useBlocking = False
 
     def testSimple(self):
         vol = np.zeros((100, 110, 120, 1, 1), dtype=np.uint8)
@@ -21,6 +20,7 @@ class TestOpConnectedComponents(unittest.TestCase):
         vol = vigra.taggedView(vol, axistags='xyzct')
 
         op = OpConnectedComponents(graph=Graph())
+        op.useBlocking.setValue(self.useBlocking)
         op.Input.setValue(vol)
 
         output = op.Output[...].wait()
@@ -42,6 +42,7 @@ class TestOpConnectedComponents(unittest.TestCase):
         vol = vol.withAxes(*'yzctx')
 
         op = OpConnectedComponents(graph=Graph())
+        op.useBlocking.setValue(self.useBlocking)
         op.Input.setValue(vol)
 
         output = op.Output[...].wait()
@@ -63,6 +64,7 @@ class TestOpConnectedComponents(unittest.TestCase):
         vol = vigra.taggedView(vol, axistags='xyzct')
 
         op = OpConnectedComponents(graph=Graph())
+        op.useBlocking.setValue(self.useBlocking)
         op.Input.setValue(vol)
 
         # need the squeeze for np.all()
@@ -81,10 +83,11 @@ class TestOpConnectedComponents(unittest.TestCase):
         self.skipTest("Test not implemented yet.")
 
 
-@unittest.skipIf(not blocked_available, "Module blockedarray is missing.")
+@unittest.skipIf(not OpBlockedConnectedComponents.is_available,
+                 "Module blockedarray is missing.")
 class TestOpConnectedComponentsBlocked(TestOpConnectedComponents):
     def setUp(self):
-        OpConnectedComponents.useBlocking = True
+        self.useBlocking = True
 
 
 class TestMisc(unittest.TestCase):

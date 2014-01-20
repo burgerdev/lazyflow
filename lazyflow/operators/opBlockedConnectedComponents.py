@@ -15,10 +15,10 @@ from lazyflow.operators import OpCompressedCache, OpReorderAxes
 try:
     import blockedarray
 except ImportError as e:
-    module_available = False
+    _module_available = False
     _importMsg = str(e)
 else:
-    module_available = True
+    _module_available = True
 
 
 # This operator takes a (possibly blocked) input image and produces a label
@@ -42,9 +42,12 @@ class OpBlockedConnectedComponents(Operator):
 
     Output = OutputSlot()
 
+    # class attribute stating whether the class can actually be instantiated
+    is_available = _module_available
+
     def __init__(self, *args, **kwargs):
         super(OpBlockedConnectedComponents, self).__init__(*args, **kwargs)
-        if not module_available:
+        if not _module_available:
             raise ImportError("Importing module 'blockedarray' failed:\n"
                               "{}".format(_importMsg))
 
@@ -146,7 +149,7 @@ class OpBlockedConnectedComponents(Operator):
         pool.clean()
 
 
-if module_available:
+if _module_available:
 
     class _Source(blockedarray.adapters.SourceABC):
         def __init__(self, slot, blockShape, c, t):

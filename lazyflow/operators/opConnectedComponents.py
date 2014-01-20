@@ -1,9 +1,13 @@
 
+import logging
+
 import numpy as np
 import vigra
 
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.operators import OpLabelImage, OpBlockedConnectedComponents
+
+logger = logging.getLogger(__name__)
 
 
 class OpConnectedComponents(Operator):
@@ -13,10 +17,9 @@ class OpConnectedComponents(Operator):
     # Must be a list: one for each channel of the volume.
     BackgroundLabels = InputSlot(optional=True)
 
-    Output = OutputSlot()
+    useBlocking = InputSlot(value=False)
 
-    # class attribute
-    useBlocking = False
+    Output = OutputSlot()
 
     # PRIVATE ATTRIBUTES
     _blockShape = np.asarray((100, 100, 100))
@@ -28,7 +31,7 @@ class OpConnectedComponents(Operator):
     def setupOutputs(self):
         #self.Output.meta.assignFrom(self.Input.meta)
         #self.Output.meta.dtype = np.uint32
-        
+
         if self._opLabel is not None:
             opLabel = self._opLabel
             self._opLabel = None
@@ -36,7 +39,7 @@ class OpConnectedComponents(Operator):
             opLabel.Input.disconnect()
             self.Output.disconnect()
             del opLabel
-        
+
         if not self._useBlockedVersion():
             opLabel = OpLabelImage(parent=self)
             opLabel.Input.connect(self.Input)
@@ -61,17 +64,30 @@ class OpConnectedComponents(Operator):
 
     def _useBlockedVersion(self):
         # blocking enabled ?
-        if not OpConnectedComponents.useBlocking:
+        if not self.useBlocking.value:
             return False
 
+        if not OpBlockedConnectedComponents.is_available:
+            return False
+
+        # correct dtype?
         if self.Input.meta.dtype != np.uint8:
+            logger.debug(
+                "Won't use blocked labeling for data type '{}'.".format(
+                    self.Input.meta.dtype))
             return False
 
+        logger.debug("Using blockwise connected components.")
         return True
 
-    def _setBlockShape(self):
-        shape = [1,1,1]
-        blockMax = 250
+    def _setBlockShape(self, blockMax=500):
+        '''
+        set the block shape such that it
+          (a) divides the volume shape evenly
+          (b) is smaller than a given maximum (500 == 1GB per block)
+          (c) is maximal for all block shapes satisfying (a) and (b)
+        '''
+        shape = [1, 1, 1]
         inshape = self.Input.meta.getTaggedShape()
         for i, s in enumerate('xyz'):
             if s in inshape:
@@ -84,9 +100,10 @@ class OpConnectedComponents(Operator):
                         m = f
                     else:
                         break
-                
+
                 shape[i] = m
         self._blockShape = tuple(shape)
+        logger.debug("Using block shape {}".format(shape))
 
 
 ######## BASIC MATH FOR BLOCK SHAPE ########
@@ -99,14 +116,14 @@ _primes = [
     317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409,
     419, 421, 431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499]
 
+
 def _factorize(n):
     '''
     factorize an integer, return list of prime factors (up to 499)
     '''
     maxP = int(np.sqrt(n))
-    for i in range(len(_primes)):
-        p = _primes[i]
-        if p>maxP:
+    for p in _primes:
+        if p > maxP:
             return [n]
         if n % p == 0:
             ret = _factorize(n//p)
@@ -114,12 +131,13 @@ def _factorize(n):
             return ret
     assert False, "How did you get here???"
 
+
 def _combine(f):
     '''
     possible combinations of factors of f
     '''
-    
-    if len(f)<2:
+
+    if len(f) < 2:
         return f
     ret = []
     for i in range(len(f)):
@@ -129,6 +147,5 @@ def _combine(f):
         for s in sub:
             ret.append(s*n)
         f.append(n)
-    return ret   
-    
+    return ret
 
