@@ -32,7 +32,7 @@ class _OpLabelImage(Operator):
 
         See ascii schematic in comments above for an overview.
         """
-        super( OpLabelImage, self ).__init__( *args, **kwargs )
+        super(_OpLabelImage, self).__init__( *args, **kwargs )
         
         self.opTimeSlicer = OpMultiArraySlicer2( parent=self )
         self.opTimeSlicer.AxisFlag.setValue('t')
