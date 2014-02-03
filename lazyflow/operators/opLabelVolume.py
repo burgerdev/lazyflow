@@ -10,7 +10,7 @@ from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.metaDict import MetaDict
 from lazyflow.request import Request, RequestPool
-from lazyflow.operators import OpCompressedCache, OpReorderAxes
+from lazyflow.operators import OpArrayCache, OpCompressedCache, OpReorderAxes
 from lazyflow.operators import OpMultiArraySlicer, OpMultiArrayStacker
 
 # try to import the blockedarray module, fail only if neccessary
@@ -132,7 +132,8 @@ class OpLabelVolume(Operator):
         if self._opCC[0][0].usesInternalCache():
             self.CachedOutput.connect(self._op5_2.Output)
         else:
-            cache = OpArrayCache(parent=self)
+            #FIXME ArrayCache or CompressedCache?
+            cache = OpCompressedCache(parent=self)
             cache.Input.connect(self._op5_2.Output)
             self._cache = cache
             self.CachedOutput.connect(cache.Output)
@@ -142,6 +143,7 @@ class OpLabelVolume(Operator):
 
     def propagateDirty(self, slot, subindex, roi):
         pass
+
 
 ## Wrapper for multiple CL implementations
 #
@@ -255,6 +257,30 @@ class _OpCCLInterface(Operator):
         raise NotImplementedError("Abstract method not implemented")
 
 
+class _OpVigraCCL(_OpCCLInterface):
+
+    def usesInternalCache(self):
+        return False
+
+    def setupOutputs(self):
+        assert self.Input.meta.dtype in [np.uint8, np.uint32],\
+            "Datatype {} not supported".format(self.Input.meta.dtype)
+        self.Output.meta.assignFrom(self.Input.meta)
+        self.Output.meta.dtype = np.int32
+
+    def execute(self, slot, subindex, roi, result):
+        s = self.Input.meta.shape
+        source = self.Input[...].wait()
+        bg = self.Background[0].wait()
+        temp = vigra.analysis.labelVolumeWithBackground(
+            source, background_value=int(bg[0]))
+        result[:] = temp[roi.toSlice()]
+
+    def propagateDirty(self, dirtySlot, subindex, roi):
+        # a change to any of our two slots requires recomputation
+        self.Output.setDirty(slice(None))
+
+
 class _OpFullCCLInterface(_OpCCLInterface):
 
     def usesInternalCache(self):
@@ -305,21 +331,6 @@ class _OpFullCCLInterface(_OpCCLInterface):
 
     def _computeCCL(self):
         raise NotImplementedError("This method is still abstract")
-
-
-class _OpVigraCCL(_OpFullCCLInterface):
-    def setupOutputs(self):
-        super(_OpVigraCCL, self).setupOutputs()
-        assert self.Input.meta.dtype in [np.uint8, np.uint32],\
-            "Datatype {} not supported".format(self.Input.meta.dtype)
-
-    def _computeCCL(self):
-        s = self.Input.meta.shape
-        source = self.Input[...].wait()
-        bg = self.Background[0].wait()
-        result = vigra.analysis.labelVolumeWithBackground(
-            source, background_value=int(bg[0]))
-        self._cache.Input[0:s[0], 0:s[1], 0:s[2]] = result
 
 
 class _OpBlockedArrayCCL(_OpFullCCLInterface):
