@@ -6,6 +6,7 @@ import unittest
 from lazyflow.graph import Graph
 from lazyflow.operators import OpLabelVolume
 
+from numpy.testing import assert_array_equal, assert_array_almost_equal
 
 class TestVigra(unittest.TestCase):
 
@@ -23,7 +24,7 @@ class TestVigra(unittest.TestCase):
 
         out = op.Output[...].wait()
 
-        assert np.all(vol.shape == out.shape)
+        assert_array_equal(vol.shape, out.shape)
 
     def testCorrectLabeling(self):
         vol = np.zeros((1000, 100, 10))
@@ -72,6 +73,20 @@ class TestVigra(unittest.TestCase):
                 print("t={}, c={}".format(t, c))
                 assertEquivalentLabeling(blocks[..., c, t], out[..., c, t])
 
+    def testConsistency(self):
+        vol = np.zeros((1000, 100, 10))
+        vol = vol.astype(np.uint8)
+        vol = vigra.taggedView(vol, axistags='xyz')
+        vol[:200, ...] = 1
+        vol[800:, ...] = 1
+
+        op = OpLabelVolume(graph=Graph())
+        op.Method.setValue(self.method)
+        op.Input.setValue(vol)
+
+        out1 = op.Output[:500, ...].wait()
+        out2 = op.Output[500:,...].wait()
+        assert out1[0,0,0] != out2[499,0,0]
 
 def assertEquivalentLabeling(x, y):
     assert np.all(x.shape == y.shape),\

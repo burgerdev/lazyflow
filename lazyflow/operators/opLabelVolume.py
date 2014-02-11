@@ -22,6 +22,7 @@ except ImportError as e:
 else:
     _blockedarray_module_available = True
 
+
 ## OpLabelVolume - the **unified** connected components operator
 #
 # This operator computes the connected component labeling of the input volume.
@@ -64,7 +65,6 @@ class OpLabelVolume(Operator):
 
     def __init__(self, *args, **kwargs):
         super(OpLabelVolume, self).__init__(*args, **kwargs)
-        # connect the operators as far as we can without knowledge of the input
 
         # we just want to have 5d data internally
         op5 = OpReorderAxes(parent=self)
@@ -72,229 +72,41 @@ class OpLabelVolume(Operator):
         op5.AxisOrder.setValue('xyzct')
         self._op5 = op5
 
-        # slice input along channel and time axis
-        self._timeSlicer = OpMultiArraySlicer(parent=self)
-        self._timeSlicer.AxisFlag.setValue('t')
-        self._timeSlicer.Input.connect(self._op5.Output)
-        assert self._timeSlicer.Slices.level == 1
-
-        self._channelSlicer = OperatorWrapper(OpMultiArraySlicer, parent=self)
-        self._channelSlicer.AxisFlag.setValue( 'c' )
-        self._channelSlicer.Input.connect(self._timeSlicer.Slices )
-        assert self._channelSlicer.Slices.level == 2
-
-        # doubly wrap inner operator
-        opCC = OperatorWrapper(_OpWrappedSwitchLabelingImplementations,
-                               parent=self, broadcastingSlotNames=['Method'])
-        assert opCC.Input.level == 2
-        assert opCC.Output.level == 2
-
-        #TODO slice background values
-
-        opCC.Input.connect(self._channelSlicer.Slices)
-        self._opCC = opCC
-
-        # stack output along channel and time axis again
-        self._channelStacker = OperatorWrapper(OpMultiArrayStacker, parent=self)
-        self._channelStacker.AxisFlag.setValue('c')
-        self._channelStacker.AxisIndex.setValue(3)
-        assert self._channelStacker.Images.level == 2
-        self._channelStacker.Images.connect(self._opCC.Output)
-
-        self._timeStacker = OpMultiArrayStacker(parent=self)
-        self._timeStacker.AxisFlag.setValue('t')
-        self._timeStacker.AxisIndex.setValue(4)
-        assert self._channelStacker.Output.level == 1
-        assert self._timeStacker.Images.level == 1
-        self._timeStacker.Images.connect(self._channelStacker.Output)
+        self._opLabel = OpLabel5D(parent=self)
+        self._opLabel.Input.connect(op5.Output)
+        self._opLabel.Method.connect(self.Method)
 
         op5_2 = OpReorderAxes(parent=self)
-        op5_2.Input.connect(self._timeStacker.Output)
+        op5_2.Input.connect(self._opLabel.Output)
+        #op5_2.AxisOrder.setValue("".join([ax for ax in self.Input.meta.getTaggedShape()]))
         self._op5_2 = op5_2
 
         self.Output.connect(op5_2.Output)
+        #FIXME connect to the right slot
+        self.CachedOutput.connect(op5_2.Output)
 
     def setupOutputs(self):
-        # now we know what the input looks like, and which method to use, so we
-        # can set up the caching and the background labels
-
-        if False and self.Background.ready():  #TODO remove when implemented
-            self._opCC.Background.connect(self._opBgSlice)
-        else:
-            val = np.asarray([0])
-            val = vigra.taggedView(val, axistags='x')
-            # set all background values to 0
-            for tSlot in self._opCC.Background:
-                for cSlot in tSlot:
-                    cSlot.setValue(val)
-
-        # decide whether an outer cache is needed
-        if self._opCC[0][0].usesInternalCache():
-            self.CachedOutput.connect(self._op5_2.Output)
-        else:
-            #FIXME ArrayCache or CompressedCache?
-            cache = OpCompressedCache(parent=self)
-            cache.Input.connect(self._op5_2.Output)
-            self._cache = cache
-            self.CachedOutput.connect(cache.Output)
-
         self._op5_2.AxisOrder.setValue(
             "".join([s for s in self.Input.meta.getTaggedShape()]))
+        pass
 
     def propagateDirty(self, slot, subindex, roi):
+        # nothing to do here, all slots are connected
         pass
 
 
-## Wrapper for multiple CL implementations
-#
-# This wrapper decides which implementation of connected component labeling
-# should be used and how caching is handled. There are two main ways of doing
-# CCL:
-#   * LAZY: compute the labeling on only that part that is really relevant for
-#           providing a unique labeling for other regions in the future
-#   * FULL: when the first request comes in, compute the labeling once and
-#           write it to a cache
-class _OpSwitchLabelingImplementations(Operator):
-
-    ## the volume to label
-    # (3d with axes 'xyz', dtype ??? #TODO)
+class OpLabel5D(Operator):
     Input = InputSlot()
-
-    ## provide labels that are treated as background
-    # a single element array
-    Background = InputSlot()
-
-    ## decide which CCL method to use
-    #
-    # This slot is the whole point of this operator
-    Method = InputSlot(value=np.asarray(('vigra',), dtype=np.object))
-
+    Method = InputSlot()
     Output = OutputSlot()
-
-    _ccl = None
-
-    def setupOutputs(self):
-
-        method = self.Method[0].wait()
-
-        # disconnect internal operator if we created one earlier
-        if self._ccl is not None:
-            self.Output.disconnect()
-            self._ccl.Input.disconnect()
-            self._ccl.Background.disconnect()
-            self._ccl = None
-
-        # switch the implementation
-        if method == 'vigra':
-            self._ccl = _OpVigraCCL(parent=self)
-        elif method == 'blocked':
-            self._ccl = _OpBlockedArrayCCL(parent=self)
-        else:
-            raise ValueError(
-                "Unknown connected components labeling method '{}'".format(
-                    method))
-        self._ccl.Input.connect(self.Input)
-        self._ccl.Background.connect(self.Background)
-        self.Output.connect(self._ccl.Output)
-
-    def execute(self, slot, subindex, roi, result):
-        assert False, "Shouldn't get here"
-
-    def propagateDirty(self, slot, subindex, roi):
-        pass
-
-    def usesInternalCache(self):
-        if self._ccl is not None:
-            return self._ccl.usesInternalCache()
-        else:
-            return True
-
-## wrapped operator
-# currently double wrapping not available
-class _OpWrappedSwitchLabelingImplementations(Operator):
-
-    ## the volume to label
-    # (3d with axes 'xyz', dtype ??? #TODO)
-    Input = InputSlot(level=1)
-
-    ## provide labels that are treated as background
-    # a single element array
-    Background = InputSlot(level=1)
-
-    ## decide which CCL method to use
-    #
-    # This slot is the whole point of this operator
-    Method = InputSlot(value=np.asarray(('vigra',), dtype=np.object))
-
-    Output = OutputSlot(level=1)
-
+    CachedOutput = OutputSlot()
     def __init__(self, *args, **kwargs):
-        super(_OpWrappedSwitchLabelingImplementations, self).__init__(*args, **kwargs)
-        op = OperatorWrapper(_OpSwitchLabelingImplementations, parent=self,
-                             broadcastingSlotNames=['Method'])
-        op.Input.connect(self.Input)
-        op.Background.connect(self.Background)
-        op.Method.connect(self.Method)
-        self.Output.connect(op.Output)
-        self._op = op
-
-    def execute(self, slot, subindex, roi, result):
-        pass
-
-    def propagateDirty(self, slot, subindex, roi):
-        pass
-
-    def __getitem__(self, key):
-        return self._op[key]
-
-
-class _OpCCLInterface(Operator):
-    Input = InputSlot()
-    Background = InputSlot()
-    Output = OutputSlot()
-
-    def usesInternalCache(self):
-        raise NotImplementedError("Abstract method not implemented")
-
-
-class _OpVigraCCL(_OpCCLInterface):
-
-    def usesInternalCache(self):
-        return False
-
-    def setupOutputs(self):
-        assert self.Input.meta.dtype in [np.uint8, np.uint32],\
-            "Datatype {} not supported".format(self.Input.meta.dtype)
-        self.Output.meta.assignFrom(self.Input.meta)
-        self.Output.meta.dtype = np.int32
-
-    def execute(self, slot, subindex, roi, result):
-        s = self.Input.meta.shape
-        source = self.Input[...].wait()
-        bg = self.Background[0].wait()
-        temp = vigra.analysis.labelVolumeWithBackground(
-            source, background_value=int(bg[0]))
-        result[:] = temp[roi.toSlice()]
-
-    def propagateDirty(self, dirtySlot, subindex, roi):
-        # a change to any of our two slots requires recomputation
-        self.Output.setDirty(slice(None))
-
-
-class _OpFullCCLInterface(_OpCCLInterface):
-
-    def usesInternalCache(self):
-        return True
-    
-    def __init__(self, *args, **kwargs):
-        super(_OpFullCCLInterface, self).__init__(*args, **kwargs)
-        self._lock = ThreadLock()
-        self._alreadyCached = False
+        super(OpLabel5D, self).__init__(*args, **kwargs)
         self._cache = None
         self._metaProvider = _OpMetaProvider(parent=self)
-    
+
     def setupOutputs(self):
-        assert len(self.Input.meta.shape) == 3, "Only 3d data supported"
+        labelType = np.int32
 
         # remove unneeded old cache
         if self._cache is not None:
@@ -303,36 +115,77 @@ class _OpFullCCLInterface(_OpCCLInterface):
 
         m = self.Input.meta
         self._metaProvider.setMeta(
-            MetaDict({'shape': m.shape, 'dtype': np.int32,
+            MetaDict({'shape': m.shape, 'dtype': labelType,
                       'axistags': m.axistags}))
 
         self._cache = OpCompressedCache(parent=self)
         self._cache.Input.connect(self._metaProvider.Output)
         self.Output.meta.assignFrom(self._cache.Output.meta)
+        self.CachedOutput.meta.assignFrom(self._cache.Output.meta)
+
+        s = self.Input.meta.getTaggedShape()
+        self._cached = np.zeros((s['c'], s['t']))
+
+    def propagateDirty(self, slot, subindex, roi):
+        # a change somewhere makes the whole time-channel-slice dirty
+        # (CCL with vigra is a global operation)
+        for t in range(roi.start[4], roi.stop[4]):
+            for c in range(roi.start[3], roi.stop[3]):
+                self._cached[c, t] = 0
 
     def execute(self, slot, subindex, roi, result):
-        # the first call to the output slot triggers computation, all others
-        # wait for the data to arrive
-        self._lock.acquire()
-        if not self._alreadyCached:
-            self._computeCCL()
-            self._alreadyCached = True
-        self._lock.release()
-
-        # return the requested roi
+        
+        # do labeling in parallel over channels and time slices
+        #FIXME make parallel
+        for t in range(roi.start[4], roi.stop[4]):
+            for c in range(roi.start[3], roi.stop[3]):
+                # update the whole slice, if needed
+                print("Updating slice c={}, t={}".format(c,t))
+                self._updateSlice(c, t)
+        
         req = self._cache.Output.get(roi)
         req.writeInto(result)
         req.block()
+    
+    def _updateSlice(self, c, t):
+        if self._cached[c, t]:
+            return
+        method = self.Method[0].wait()
+    
+        if method == 'vigra':
+            cc = self._vigraCC
+        elif method == 'blocked':
+            cc = self._blockedCC
+        else:
+            raise ValueError("Connected Component Labeling method '{}' not supported".format(method))
+        
+        cc(c, t)
+        #FIXME add Lock
+        self._cached [c,t] = 1
 
-    def propagateDirty(self, dirtySlot, subindex, roi):
-        # a change to any of our two slots requires recomputation
-        self._alreadyCached = False
-        self._cache.Input.setDirty(slice(None))
+    def _vigraCC(self, c, t):
+        source = vigra.taggedView(self.Input[..., c, t].wait(), axistags='xyzct')
+        source = source.withAxes(*'xyz')
+        #FIXME hardcoded background
+        result = vigra.analysis.labelVolumeWithBackground(
+            source, background_value=0)
+        result = result.withAxes(*'xyzct')
 
-    def _computeCCL(self):
-        raise NotImplementedError("This method is still abstract")
+        stop = np.asarray(self.Input.meta.shape)
+        start = 0*stop
+        start[3:] = (c, t)
+        stop[3:] = (c+1, t+1)
+        roi = SubRegion(self._cache.Input, start=start, stop=stop)
+
+        self._cache.setInSlot(self._cache.Input, (), roi, result)
+
+    def _blockedCC(self, c, t):
+        raise NotImplementedError()
 
 
+
+'''
+## Prototype of blockedarray integration
 class _OpBlockedArrayCCL(_OpFullCCLInterface):
     def setupOutputs(self):
         super(_OpBlockedArrayCCL, self).setupOutputs()
@@ -346,35 +199,8 @@ class _OpBlockedArrayCCL(_OpFullCCLInterface):
         sink = _Sink(self._cache, c, t)
         cc = blockedarray.dim3.ConnectedComponents(source, blockShape)
         cc.writeToSink(sink)
-
-
-## An OperatorWrapper to promote slots to arbitrary levels
-#
-# Level==1 -> ordinary operator wrapper
-# FIXME just a simple implementation, many details missing
 '''
-class _OperatorMultiWrapper(OperatorWrapper):
-    name = "OperatorMultiWrapper"
-    def __init__(self, level, operatorClass, operator_args=None,
-                 operator_kwargs=None, parent=None, graph=None,
-                 promotedSlotNames=None, broadcastingSlotNames=None):
-        if level > 1:
-            print("Constructing outer wrapper")
-            # wrap this class recursively
-            super(_OperatorMultiWrapper, self).__init__(
-                _OperatorMultiWrapper,
-                operator_args=[level-1, operatorClass],
-                operator_kwargs={},
-                parent=parent, graph=graph)
-        else:
-            print("constructing inner wrapper")
-            # construct a simple OperatorWrapper
-            super(_OperatorMultiWrapper, self).__init__(
-                operatorClass, operator_args=operator_args,
-                operator_kwargs=operator_kwargs, parent=parent,
-                graph=graph, promotedSlotNames=promotedSlotNames,
-                broadcastingSlotNames=broadcastingSlotNames)
-'''
+
 
 ## Feeds meta data into OpCompressedCache
 #
@@ -392,6 +218,7 @@ class _OpMetaProvider(Operator):
         pass
 
     def execute(self, slot, subindex, roi, result):
+        print(roi)
         assert False,\
             "The cache asked for data which should not happen."
 
