@@ -1,5 +1,6 @@
 
 from threading import Lock as ThreadLock
+from functools import partial
 
 import numpy as np
 import vigra
@@ -39,8 +40,8 @@ class OpLabelVolume(Operator):
     # E.g.: volume.taggedShape = {'x': 10, 'y': 12, 'z': 5, 'c': 3, 't': 100}
     # ==>
     # background.taggedShape = {'c': 3, 't': 100}
-    #TODO not implemented yet!
-    #Background = InputSlot(optional=True)
+    #TODO relax requirements
+    Background = InputSlot(optional=True)
 
     ## decide which CCL method to use
     #
@@ -78,7 +79,6 @@ class OpLabelVolume(Operator):
 
         op5_2 = OpReorderAxes(parent=self)
         op5_2.Input.connect(self._opLabel.Output)
-        #op5_2.AxisOrder.setValue("".join([ax for ax in self.Input.meta.getTaggedShape()]))
         self._op5_2 = op5_2
 
         self.Output.connect(op5_2.Output)
@@ -86,20 +86,40 @@ class OpLabelVolume(Operator):
         self.CachedOutput.connect(op5_2.Output)
 
     def setupOutputs(self):
+        # set the final reordering operator's AxisOrder to that of the input
         self._op5_2.AxisOrder.setValue(
             "".join([s for s in self.Input.meta.getTaggedShape()]))
-        pass
+        if self.Background.ready():
+            self._setBG()
 
     def propagateDirty(self, slot, subindex, roi):
-        # nothing to do here, all slots are connected
-        pass
+        if slot == self.Background:
+            self._setBG(self.Background.value)
+        else:
+            self._setBG(0)
+
+    ## set the background values of inner operator
+    def _setBG(self, val):
+        bg = np.asarray(val)
+        if bg.size == 1:
+            bg = np.zeros(self._op5.Output.meta.shape[3:])
+            bg[:] = val
+        else:
+            bg = val
+        bg = vigra.taggedView(bg, axistags='ct')
+        #bg.flat = [v for (u,v) in np.broadcast(bg, val)]
+        bg = bg.withAxes(*'xyzct')
+        self._opLabel.Background.setValue(bg)
 
 
 class OpLabel5D(Operator):
     Input = InputSlot()
     Method = InputSlot()
+    Background = InputSlot()
+
     Output = OutputSlot()
     CachedOutput = OutputSlot()
+
     def __init__(self, *args, **kwargs):
         super(OpLabel5D, self).__init__(*args, **kwargs)
         self._cache = None
@@ -124,51 +144,74 @@ class OpLabel5D(Operator):
         self.CachedOutput.meta.assignFrom(self._cache.Output.meta)
 
         s = self.Input.meta.getTaggedShape()
-        self._cached = np.zeros((s['c'], s['t']))
+        shape = (s['c'], s['t'])
+        self._cached = np.zeros(shape)
+
+        # prepare locks for each channel and time slice
+        locks = np.empty(shape, dtype=np.object)
+        for c in range(s['c']):
+            for t in range(s['t']):
+                locks[c, t] = ThreadLock()
+        self._locks = locks
 
     def propagateDirty(self, slot, subindex, roi):
         # a change somewhere makes the whole time-channel-slice dirty
         # (CCL with vigra is a global operation)
+        # applies for Background and Input
         for t in range(roi.start[4], roi.stop[4]):
             for c in range(roi.start[3], roi.stop[3]):
                 self._cached[c, t] = 0
 
     def execute(self, slot, subindex, roi, result):
-        
+        # get the background values
+        bg = self.Background[...].wait()
+        bg = vigra.taggedView(bg, axistags=self.Background.meta.axistags)
+        bg = bg.withAxes(*'ct')
+
         # do labeling in parallel over channels and time slices
-        #FIXME make parallel
+        pool = RequestPool()
+
         for t in range(roi.start[4], roi.stop[4]):
             for c in range(roi.start[3], roi.stop[3]):
                 # update the whole slice, if needed
-                print("Updating slice c={}, t={}".format(c,t))
-                self._updateSlice(c, t)
-        
+                req = Request(partial(self._updateSlice, c, t, bg[c, t]))
+                pool.add(req)
+
+        pool.wait()
+        pool.clean()
+
         req = self._cache.Output.get(roi)
         req.writeInto(result)
         req.block()
-    
-    def _updateSlice(self, c, t):
+
+    def _updateSlice(self, c, t, bg):
+        # only one thread may update the cache for this c and t, other requests
+        # must wait until labeling is finished
+        self._locks[c, t].acquire()
         if self._cached[c, t]:
             return
         method = self.Method[0].wait()
-    
+
+        # assign method to use
         if method == 'vigra':
             cc = self._vigraCC
         elif method == 'blocked':
             cc = self._blockedCC
         else:
             raise ValueError("Connected Component Labeling method '{}' not supported".format(method))
-        
-        cc(c, t)
-        #FIXME add Lock
-        self._cached [c,t] = 1
 
-    def _vigraCC(self, c, t):
+        cc(c, t, bg)
+        self._cached [c,t] = 1
+        self._locks[c, t].release()
+
+    def _vigraCC(self, c, t, bg):
         source = vigra.taggedView(self.Input[..., c, t].wait(), axistags='xyzct')
         source = source.withAxes(*'xyz')
-        #FIXME hardcoded background
+        #FIXME dtype??
+        print(source.dtype)
+        print(source.shape)
         result = vigra.analysis.labelVolumeWithBackground(
-            source, background_value=0)
+            source, background_value=int(bg))
         result = result.withAxes(*'xyzct')
 
         stop = np.asarray(self.Input.meta.shape)
@@ -179,7 +222,7 @@ class OpLabel5D(Operator):
 
         self._cache.setInSlot(self._cache.Input, (), roi, result)
 
-    def _blockedCC(self, c, t):
+    def _blockedCC(self, c, t, bg):
         raise NotImplementedError()
 
 
