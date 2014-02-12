@@ -6,13 +6,11 @@ import numpy as np
 import vigra
 
 from lazyflow.operator import Operator
-from lazyflow.operatorWrapper import OperatorWrapper
 from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.metaDict import MetaDict
 from lazyflow.request import Request, RequestPool
-from lazyflow.operators import OpArrayCache, OpCompressedCache, OpReorderAxes
-from lazyflow.operators import OpMultiArraySlicer, OpMultiArrayStacker
+from lazyflow.operators import OpCompressedCache, OpReorderAxes
 
 # try to import the blockedarray module, fail only if neccessary
 try:
@@ -40,7 +38,7 @@ class OpLabelVolume(Operator):
     # E.g.: volume.taggedShape = {'x': 10, 'y': 12, 'z': 5, 'c': 3, 't': 100}
     # ==>
     # background.taggedShape = {'c': 3, 't': 100}
-    #TODO relax requirements
+    #TODO relax requirements (single value is already working)
     Background = InputSlot(optional=True)
 
     ## decide which CCL method to use
@@ -48,7 +46,7 @@ class OpLabelVolume(Operator):
     # currently available:
     # * 'vigra': use the fast algorithm from ukoethe/vigra
     # * 'blocked': use the memory saving algorithm from thorbenk/blockedarray
-    Method = InputSlot(value=np.asarray(('vigra',), dtype=np.object))
+    Method = InputSlot(value='vigra')
 
     ## Labeled volume
     # Axistags and shape are the same as on the Input, dtype is an integer
@@ -73,33 +71,54 @@ class OpLabelVolume(Operator):
         op5.AxisOrder.setValue('xyzct')
         self._op5 = op5
 
-        self._opLabel = OpLabel5D(parent=self)
-        self._opLabel.Input.connect(op5.Output)
-        self._opLabel.Method.connect(self.Method)
+        self._opLabel = None
 
-        op5_2 = OpReorderAxes(parent=self)
-        op5_2.Input.connect(self._opLabel.Output)
-        self._op5_2 = op5_2
+        self._op5_2 = OpReorderAxes(parent=self)
+        self._op5_2_cached = OpReorderAxes(parent=self)
 
-        self.Output.connect(op5_2.Output)
-        #FIXME connect to the right slot
-        self.CachedOutput.connect(op5_2.Output)
+        self.Output.connect(self._op5_2.Output)
+        self.CachedOutput.connect(self._op5_2_cached.Output)
+        
+        # available OpLabelingABCs:
+        self._labelOps = {'vigra': _OpLabelVigra, 'blocked': _OpLabelBlocked}
 
     def setupOutputs(self):
+
+        if self._opLabel is not None:
+            # fully remove old labeling operator
+            self._op5_2.Input.disconnect()
+            self._op5_2_cached.Input.disconnect()
+            self._opLabel.Input.disconnect()
+            del self._opLabel
+
+        self._opLabel = self._labelOps[self.Method.value](parent=self)
+        self._opLabel.Input.connect(self._op5.Output)
+
+        # connect reordering operators
+        self._op5_2.Input.connect(self._opLabel.Output)
+        self._op5_2_cached.Input.connect(self._opLabel.CachedOutput)
+        
+
         # set the final reordering operator's AxisOrder to that of the input
-        self._op5_2.AxisOrder.setValue(
-            "".join([s for s in self.Input.meta.getTaggedShape()]))
-        if self.Background.ready():
-            self._setBG()
+        origOrder = "".join([s for s in self.Input.meta.getTaggedShape()])
+        self._op5_2.AxisOrder.setValue(origOrder)
+        self._op5_2_cached.AxisOrder.setValue(origOrder)
+
+        # set background values
+        self._setBG()
+        
 
     def propagateDirty(self, slot, subindex, roi):
-        if slot == self.Background:
-            self._setBG(self.Background.value)
-        else:
-            self._setBG(0)
+        # just reset the background, that will trigger recomputation
+        #FIXME respect roi
+        self._setBG()
 
     ## set the background values of inner operator
-    def _setBG(self, val):
+    def _setBG(self):
+        if self.Background.ready():
+            val = self.Background.value
+        else:
+            val = 0
         bg = np.asarray(val)
         if bg.size == 1:
             bg = np.zeros(self._op5.Output.meta.shape[3:])
@@ -112,16 +131,16 @@ class OpLabelVolume(Operator):
         self._opLabel.Background.setValue(bg)
 
 
-class OpLabel5D(Operator):
+## parent class for all connected component labeling implementations
+class OpLabelingABC(Operator):
     Input = InputSlot()
-    Method = InputSlot()
     Background = InputSlot()
 
     Output = OutputSlot()
     CachedOutput = OutputSlot()
 
     def __init__(self, *args, **kwargs):
-        super(OpLabel5D, self).__init__(*args, **kwargs)
+        super(OpLabelingABC, self).__init__(*args, **kwargs)
         self._cache = None
         self._metaProvider = _OpMetaProvider(parent=self)
 
@@ -131,7 +150,7 @@ class OpLabel5D(Operator):
         # remove unneeded old cache
         if self._cache is not None:
             self._cache.Input.disconnect()
-            self._cache = None
+            del self._cache
 
         m = self.Input.meta
         self._metaProvider.setMeta(
@@ -139,6 +158,7 @@ class OpLabel5D(Operator):
                       'axistags': m.axistags}))
 
         self._cache = OpCompressedCache(parent=self)
+        self._cache.name = "OpLabelVolume.OpCompressedCache"
         self._cache.Input.connect(self._metaProvider.Output)
         self.Output.meta.assignFrom(self._cache.Output.meta)
         self.CachedOutput.meta.assignFrom(self._cache.Output.meta)
@@ -163,6 +183,7 @@ class OpLabel5D(Operator):
                 self._cached[c, t] = 0
 
     def execute(self, slot, subindex, roi, result):
+        #FIXME we don't care right now which slot is requested, just return cached CC
         # get the background values
         bg = self.Background[...].wait()
         bg = vigra.taggedView(bg, axistags=self.Background.meta.axistags)
@@ -173,7 +194,13 @@ class OpLabel5D(Operator):
 
         for t in range(roi.start[4], roi.stop[4]):
             for c in range(roi.start[3], roi.stop[3]):
-                # update the whole slice, if needed
+                # only one thread may update the cache for this c and t, other requests
+                # must wait until labeling is finished
+                self._locks[c, t].acquire()
+                if self._cached[c, t]:
+                    # this slice is already computed
+                    continue
+                # update the whole slice
                 req = Request(partial(self._updateSlice, c, t, bg[c, t]))
                 pool.add(req)
 
@@ -184,32 +211,23 @@ class OpLabel5D(Operator):
         req.writeInto(result)
         req.block()
 
+        # release locks and set caching flags
+        for t in range(roi.start[4], roi.stop[4]):
+            for c in range(roi.start[3], roi.stop[3]):
+                self._cached [c,t] = 1
+                self._locks[c, t].release()
+
+    ## compute the requested slice and put the results into self._cache
+    #
     def _updateSlice(self, c, t, bg):
-        # only one thread may update the cache for this c and t, other requests
-        # must wait until labeling is finished
-        self._locks[c, t].acquire()
-        if self._cached[c, t]:
-            return
-        method = self.Method[0].wait()
+        raise NotImplementedError("This is an abstract method")
 
-        # assign method to use
-        if method == 'vigra':
-            cc = self._vigraCC
-        elif method == 'blocked':
-            cc = self._blockedCC
-        else:
-            raise ValueError("Connected Component Labeling method '{}' not supported".format(method))
 
-        cc(c, t, bg)
-        self._cached [c,t] = 1
-        self._locks[c, t].release()
-
-    def _vigraCC(self, c, t, bg):
+## vigra connected components
+class _OpLabelVigra(OpLabelingABC):
+    def _updateSlice(self, c, t, bg):
         source = vigra.taggedView(self.Input[..., c, t].wait(), axistags='xyzct')
         source = source.withAxes(*'xyz')
-        #FIXME dtype??
-        print(source.dtype)
-        print(source.shape)
         result = vigra.analysis.labelVolumeWithBackground(
             source, background_value=int(bg))
         result = result.withAxes(*'xyzct')
@@ -222,10 +240,11 @@ class OpLabel5D(Operator):
 
         self._cache.setInSlot(self._cache.Input, (), roi, result)
 
-    def _blockedCC(self, c, t, bg):
-        raise NotImplementedError()
 
-
+## blockedarray connected components
+class _OpLabelBlocked(OpLabelingABC):
+    def _updateSlice(self, c, t, bg):
+        raise NotImplementedError("TODO: implement")
 
 '''
 ## Prototype of blockedarray integration
