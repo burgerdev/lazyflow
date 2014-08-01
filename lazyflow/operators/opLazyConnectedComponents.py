@@ -22,6 +22,7 @@
 
 import numpy as np
 import vigra
+import h5py
 import logging
 
 from collections import defaultdict
@@ -204,6 +205,10 @@ class OpLazyConnectedComponents(Operator):
 
             self._manager.waitFor(othersToWaitFor)
             self._mapArray(roi, result)
+        elif slot == self.OutputHdf5:
+            self._executeOutputHdf5(roi, result)
+        elif slot == self.CleanBlocks:
+            self._executeCleanBlocks(result)
         else:
             raise ValueError("Request to invalid slot {}".format(str(slot)))
 
@@ -214,6 +219,13 @@ class OpLazyConnectedComponents(Operator):
         # dirty region is 'small enough', etc etc.
         self._setDefaultInternals()
         self.Output.setDirty(slice(None))
+
+    def setInSlot(self, slot, subindex, key, value):
+        if slot == self.InputHdf5:
+            self._setInSlotInputHdf5(slot, subindex, key, value)
+        else:
+            raise ValueError(
+                "setInSlot() not supported for slot {}".format(slot))
 
     # grow the requested region such that all labels inside that region are
     # final
@@ -551,49 +563,51 @@ class OpLazyConnectedComponents(Operator):
         self._chunk_locks = defaultdict(HardLock)
 
     def _executeCleanBlocks(self, destination):
-        #TODO
-        pass
+        assert destination.shape == (1,)
+        finalIndices = np.where(self._isFinal)
+
+        def ind2tup(ind):
+            roi = self._chunkIndexToRoi(ind)
+            return (roi.start, roi.stop)
+
+        destination[0] = list(map(ind2tup, zip(*finalIndices)))
 
     def _executeOutputHdf5(self, roi, destination):
-        #TODO
-        logger.debug("Servicing request for hdf5 block {}".format( roi ))
+        logger.debug("Servicing request for hdf5 block {}".format(roi))
 
-        assert isinstance( destination, h5py.Group ), "OutputHdf5 slot requires an hdf5 GROUP to copy into (not a numpy array)."
-        assert ((roi.start % self._blockshape) == 0).all(), "OutputHdf5 slot requires roi to be exactly one block."
-        block_roi = getBlockBounds( self.Output.meta.shape, self._blockshape, roi.start )
-        assert (block_roi == numpy.array((roi.start, roi.stop))).all(), "OutputHdf5 slot requires roi to be exactly one block."
+        assert isinstance(destination, h5py.Group),\
+            "OutputHdf5 slot requires an hdf5 GROUP to copy into "\
+            "(not a numpy array)."
+        index = self._roiToChunkIndex(roi)[0]
+        block_roi = self._chunkIndexToRoi(index)
+        valid = np.all(roi.start == block_roi.start)
+        valid = valid and np.all(roi.stop == block_roi.stop)
+        assert valid, "OutputHdf5 slot requires roi to be exactly one block."
 
-        block_roi = [roi.start, roi.stop]
-        self._ensureCached( block_roi )
-        dataset = self._getBlockDataset( block_roi )
-        assert str(block_roi) not in destination, "destination hdf5 group already has a dataset with this block's name"
-        destination.copy( dataset, str(block_roi) )
+        name = str([block_roi.start, block_roi.stop])
+        assert name not in destination,\
+            "destination hdf5 group already has a dataset "\
+            "with this block's name"
+        destination.create_dataset(name, shape=self._chunkShape,
+                                   dtype=_LABEL_TYPE,
+                                   data=self._cache[block_roi.toSlice()])
 
     def _setInSlotInputHdf5(self, slot, subindex, roi, value):
-        #TODO
-        logger.debug("Setting block {} from hdf5".format( roi ))
-        assert isinstance( value, h5py.Dataset ), "InputHdf5 slot requires an hdf5 Dataset to copy from (not a numpy array)."
+        logger.debug("Setting block {} from hdf5".format(roi))
+        assert isinstance(value, h5py.Dataset),\
+            "InputHdf5 slot requires an hdf5 Dataset to copy from "\
+            "(not a numpy array)."
 
-        block_roi = getBlockBounds( self.Output.meta.shape, self._blockshape, roi.start )
-
-        roi_is_exactly_one_block = True
-        roi_is_exactly_one_block &= ((roi.start % self._blockshape) == 0).all()
-        roi_is_exactly_one_block &= (block_roi == numpy.array((roi.start, roi.stop))).all()
-        if roi_is_exactly_one_block:
-            cachefile = self._getCacheFile( block_roi )
-            logger.debug( "Copying HDF5 data directly into block {}".format( block_roi ) )
-            assert cachefile['data'].dtype == value.dtype
-            assert cachefile['data'].shape == value.shape
-            del cachefile['data']
-            cachefile.copy( value, 'data' )
-    
-            block_start = tuple(roi.start)
-            self._dirtyBlocks.discard( block_start )
-        else:
-            # This hdf5 data does not correspond to exactly one block.
-            # We must uncompress it and write it the "normal" way (the slow way)
-            # FIXME: This would use less memory if we uncompressed the data block-by-block
-            self.Input[roiToSlice(roi.start, roi.stop)] = value[:]
+        indices = self._roiToChunkIndex(roi)
+        for idx in indices:
+            cacheroi = self._chunkIndexToRoi(idx)
+            cacheroi.stop = np.minimum(cacheroi.stop, roi.stop)
+            cacheroi.start = np.maximum(cacheroi.start, roi.start)
+            dsroi = cacheroi.copy()
+            dsroi.start -= roi.start
+            dsroi.stop -= roi.start
+            self._cache[cacheroi.toSlice()] = value[dsroi.toSlice()]
+            self._isFinal[idx] = True
 
     # order a pair of chunk indices lexicographically
     # (ret[0] is top-left-in-front-of of ret[1])

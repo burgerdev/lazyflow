@@ -22,6 +22,7 @@
 
 import numpy as np
 import vigra
+import h5py
 import unittest
 
 from numpy.testing import assert_array_equal, assert_array_almost_equal
@@ -388,6 +389,44 @@ class TestOpLazyCC(unittest.TestCase):
         out = vigra.taggedView(out, axistags=op.Output.meta.axistags)
         out = out.withAxes(*'txyzc')
         assert np.all(out[1, 3:7, 3:7, ...] > 0)
+
+    def testHDF5(self):
+        vol = np.zeros((1000, 100, 10))
+        vol = vol.astype(np.uint8)
+        vol = vigra.taggedView(vol, axistags='xyz')
+        vol[:200, ...] = 1
+        vol[800:, ...] = 1
+
+        op = OpLazyCC(graph=Graph())
+        op.Input.setValue(vol)
+        op.ChunkShape.setValue((100, 10, 10))
+
+        blocks = op.CleanBlocks[0].wait()[0]
+        assert len(blocks) == 0
+
+        out1 = op.Output[:200, ...].wait()
+        blocks = op.CleanBlocks[0].wait()[0]
+        assert len(blocks) == 20
+
+        # prepare hdf5 file
+        f = h5py.File('temp.h5', driver='core', backing_store=False)
+
+        for block in blocks:
+            req = op.OutputHdf5(start=block[0], stop=block[1])
+            req.writeInto(f)
+            req.block()
+
+        # fill whole cache
+        op.Output[...].wait()
+
+        f.create_dataset('TEST', shape=(1, 1000, 100, 10, 1), dtype=np.uint32)
+        ds = f['TEST']
+        ds[0, ..., 0] = 23
+
+        op.InputHdf5[0:1, 0:1000, 0:100, 0:10, 0:1] = ds
+        blocks = op.CleanBlocks[0].wait()[0]
+        assert len(blocks) == 100,\
+            "Got {} clean blocks (expected {}".format(len(blocks), 100)
 
 
 class OpExecuteCounter(OpArrayPiper):
