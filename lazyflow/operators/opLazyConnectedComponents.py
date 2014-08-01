@@ -127,15 +127,34 @@ def _chunksynchronized(method):
 #       aka 'final'
 #
 class OpLazyConnectedComponents(Operator):
+    name = "OpLazyConnectedComponents"
+    supportedDtypes = [np.uint8, np.uint32, np.float32]
 
     # input data (usually segmented), in 'txyzc' order
     Input = InputSlot()
 
     # the spatial shape of one chunk, in 'xyz' order
-    ChunkShape = InputSlot()
+    ChunkShape = InputSlot(optional=True)
 
-    # the labeled output, internally cached
+    # background with axes 'txyzc', spatial axes must be singletons
+    Background = InputSlot(optional=True)
+
+    # the labeled output, internally cached (the two slots are the same)
     Output = OutputSlot()
+    CachedOutput = OutputSlot()
+
+    # cache access slots, see OpCompressedCache
+
+    # fill the cache from an HDF5 group
+    InputHdf5 = InputSlot(optional=True)
+
+    # returns an object array of length 1 that contains a list of 2-tuples
+    # first item is block start, second item is block stop (exclusive)
+    CleanBlocks = OutputSlot()
+
+    # fills an HDF5 group with data from cache, requests must be for exactly
+    # one block
+    OutputHdf5 = OutputSlot()
 
     ### INTERNALS -- DO NOT USE ###
     _Input = OutputSlot()
@@ -154,19 +173,27 @@ class OpLazyConnectedComponents(Operator):
         self._opOut = OpReorderAxes(parent=self)
         self._opOut.Input.connect(self._Output)
         self.Output.connect(self._opOut.Output)
+        self.CachedOutput.connect(self.Output)
 
     def setupOutputs(self):
         self.Output.meta.assignFrom(self.Input.meta)
         self.Output.meta.dtype = _LABEL_TYPE
         self._Output.meta.assignFrom(self._Input.meta)
         self._Output.meta.dtype = _LABEL_TYPE
-        assert self.Input.meta.dtype in [np.uint8, np.uint32, np.uint64],\
+        assert self.Input.meta.dtype in self.supportedDtypes,\
             "Cannot label data type {}".format(self.Input.meta.dtype)
+
+        self.OutputHdf5.meta.assignFrom(self.Input.meta)
+        self.CleanBlocks.meta.shape = (1,)
+        self.CleanBlocks.meta.dtype = np.object
 
         self._setDefaultInternals()
 
         # go back to original order
         self._opOut.AxisOrder.setValue(self.Input.meta.getAxisKeys())
+
+        # TODO support background values
+        # if self.Background.ready():
 
     def execute(self, slot, subindex, roi, result):
         if slot is self._Output:
@@ -476,7 +503,12 @@ class OpLazyConnectedComponents(Operator):
         # chunk array shape calculation
         #TODO change here when removing OpReorder
         shape = self._Input.meta.shape
-        chunkShape = (1,) + self.ChunkShape.value + (1,)
+        if self.ChunkShape.ready():
+            chunkShape = (1,) + self.ChunkShape.value + (1,)
+        else:
+            # TODO choose better automatic chunk shape (this is 16 million
+            # pixels per chunk)
+            chunkShape = (1, 256, 256, 256, 1)
         assert len(shape) == len(chunkShape),\
             "Encountered an invalid chunkShape"
         f = lambda i: shape[i]//chunkShape[i] + (1 if shape[i] % chunkShape[i]
@@ -518,6 +550,51 @@ class OpLazyConnectedComponents(Operator):
         # locks that keep threads from changing a specific chunk
         self._chunk_locks = defaultdict(HardLock)
 
+    def _executeCleanBlocks(self, destination):
+        #TODO
+        pass
+
+    def _executeOutputHdf5(self, roi, destination):
+        #TODO
+        logger.debug("Servicing request for hdf5 block {}".format( roi ))
+
+        assert isinstance( destination, h5py.Group ), "OutputHdf5 slot requires an hdf5 GROUP to copy into (not a numpy array)."
+        assert ((roi.start % self._blockshape) == 0).all(), "OutputHdf5 slot requires roi to be exactly one block."
+        block_roi = getBlockBounds( self.Output.meta.shape, self._blockshape, roi.start )
+        assert (block_roi == numpy.array((roi.start, roi.stop))).all(), "OutputHdf5 slot requires roi to be exactly one block."
+
+        block_roi = [roi.start, roi.stop]
+        self._ensureCached( block_roi )
+        dataset = self._getBlockDataset( block_roi )
+        assert str(block_roi) not in destination, "destination hdf5 group already has a dataset with this block's name"
+        destination.copy( dataset, str(block_roi) )
+
+    def _setInSlotInputHdf5(self, slot, subindex, roi, value):
+        #TODO
+        logger.debug("Setting block {} from hdf5".format( roi ))
+        assert isinstance( value, h5py.Dataset ), "InputHdf5 slot requires an hdf5 Dataset to copy from (not a numpy array)."
+
+        block_roi = getBlockBounds( self.Output.meta.shape, self._blockshape, roi.start )
+
+        roi_is_exactly_one_block = True
+        roi_is_exactly_one_block &= ((roi.start % self._blockshape) == 0).all()
+        roi_is_exactly_one_block &= (block_roi == numpy.array((roi.start, roi.stop))).all()
+        if roi_is_exactly_one_block:
+            cachefile = self._getCacheFile( block_roi )
+            logger.debug( "Copying HDF5 data directly into block {}".format( block_roi ) )
+            assert cachefile['data'].dtype == value.dtype
+            assert cachefile['data'].shape == value.shape
+            del cachefile['data']
+            cachefile.copy( value, 'data' )
+    
+            block_start = tuple(roi.start)
+            self._dirtyBlocks.discard( block_start )
+        else:
+            # This hdf5 data does not correspond to exactly one block.
+            # We must uncompress it and write it the "normal" way (the slow way)
+            # FIXME: This would use less memory if we uncompressed the data block-by-block
+            self.Input[roiToSlice(roi.start, roi.stop)] = value[:]
+
     # order a pair of chunk indices lexicographically
     # (ret[0] is top-left-in-front-of of ret[1])
     @staticmethod
@@ -532,7 +609,7 @@ class OpLazyConnectedComponents(Operator):
 
 
 ###########
-## TOOLS ##
+#  TOOLS  #
 ###########
 
 
