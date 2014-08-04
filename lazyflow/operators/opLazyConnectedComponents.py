@@ -181,8 +181,9 @@ class OpLazyConnectedComponents(Operator):
         self.Output.meta.dtype = _LABEL_TYPE
         self._Output.meta.assignFrom(self._Input.meta)
         self._Output.meta.dtype = _LABEL_TYPE
-        assert self.Input.meta.dtype in self.supportedDtypes,\
-            "Cannot label data type {}".format(self.Input.meta.dtype)
+        if not self.Input.meta.dtype in self.supportedDtypes:
+            raise ValueError(
+                "Cannot label data type {}".format(self.Input.meta.dtype))
 
         self.OutputHdf5.meta.assignFrom(self.Input.meta)
         self.CleanBlocks.meta.shape = (1,)
@@ -299,7 +300,12 @@ class OpLazyConnectedComponents(Operator):
         inputChunk = inputChunk.withAxes(*'xyz')
 
         # label the raw data
-        labeled = vigra.analysis.labelVolumeWithBackground(inputChunk)
+        assert self._background_valid,\
+            "Background values are configured incorrectly"
+        bg = self._background[chunkIndex[0], chunkIndex[4]]
+        bg = int(bg)
+        labeled = vigra.analysis.labelVolumeWithBackground(inputChunk,
+                                                           background_value=bg)
         labeled = vigra.taggedView(labeled, axistags='xyz').withAxes(*'txyzc')
         del inputChunk
         #TODO this could be more efficiently combined with merging
@@ -517,6 +523,10 @@ class OpLazyConnectedComponents(Operator):
         shape = self._Input.meta.shape
         if self.ChunkShape.ready():
             chunkShape = (1,) + self.ChunkShape.value + (1,)
+        elif self._Input.meta.ideal_blockshape is not None:
+            # TODO choose better automatic chunk shape (this is 16 million
+            # pixels per chunk)
+            chunkShape = self._Input.meta.ideal_blockshape
         else:
             # TODO choose better automatic chunk shape (this is 16 million
             # pixels per chunk)
@@ -528,6 +538,21 @@ class OpLazyConnectedComponents(Operator):
         self._chunkArrayShape = tuple(map(f, range(len(shape))))
         self._chunkShape = np.asarray(chunkShape, dtype=np.int)
         self._shape = shape
+
+        # determine the background values
+        self._background = np.zeros((shape[0], shape[4]),
+                                    dtype=self.Input.meta.dtype)
+        if self.Background.ready():
+            bg = self.Background[...].wait()
+            bg = vigra.taggedView(bg, axistags="txyzc").withAxes('t', 'c')
+            # we might have an old value set for the background value
+            # ignore it until it is configured correctly, or execute is called
+            if bg.size > 1 and \
+                    (shape[0] != bg.shape[0] or shape[4] != bg.shape[1]):
+                self._background_valid = False
+            else:
+                self._background_valid = True
+                self._background[:] = bg
 
         # manager object
         self._manager = _LabelManager()
