@@ -64,6 +64,16 @@ class _LabelManager(object):
         self._managedLabels = defaultdict(dict)
         self._iterator = InfiniteLabelIterator(1, dtype=int)
         self._registered = set()
+        self._total = 0
+        self._asleep = 0
+
+    @threadsafe
+    def hello(self):
+        self._total += 1
+
+    @threadsafe
+    def goodbye(self):
+        self._total -= 1
 
     # call before doing anything
     @threadsafe
@@ -84,7 +94,11 @@ class _LabelManager(object):
         others = set(others)
         remaining = others & self._registered
         while len(remaining) > 0:
+            self._asleep += 1
+            if self._asleep == self._total:
+                raise RuntimeError("Cyclic waiting detected in OpLazyConnectedComponents")
             self._lock.wait()
+            self._asleep -= 1
             remaining &= self._registered
 
     # get a list of labels that _really_ need to be globalized by you
@@ -199,13 +213,17 @@ class OpLazyConnectedComponents(Operator):
 
     def execute(self, slot, subindex, roi, result):
         if slot is self._Output:
+            logger.debug("Execute for {}".format(roi))
+            self._manager.hello()
             othersToWaitFor = set()
             chunks = self._roiToChunkIndex(roi)
             for chunk in chunks:
                 othersToWaitFor |= self.growRegion(chunk)
 
             self._manager.waitFor(othersToWaitFor)
+            self._manager.goodbye()
             self._mapArray(roi, result)
+            self._report()
         elif slot == self.OutputHdf5:
             self._executeOutputHdf5(roi, result)
         elif slot == self.CleanBlocks:
@@ -293,6 +311,7 @@ class OpLazyConnectedComponents(Operator):
             # this chunk is already labeled
             return
 
+        logger.debug("labeling chunk {} ({})".format(chunkIndex, self._chunkIndexToRoi(chunkIndex)))
         # get the raw data
         roi = self._chunkIndexToRoi(chunkIndex)
         inputChunk = self._Input.get(roi).wait()
@@ -336,6 +355,8 @@ class OpLazyConnectedComponents(Operator):
             return (np.zeros((0,), dtype=_LABEL_TYPE),)*2
         self._mergeMap[chunkA].append(chunkB)
 
+        logger.debug("merging chunks {} and {}".format(chunkA, chunkB))
+
         hyperplane_roi_a, hyperplane_roi_b = \
             self._chunkIndexToHyperplane(chunkA, chunkB)
         hyperplane_index_a = hyperplane_roi_a.toSlice()
@@ -374,6 +395,8 @@ class OpLazyConnectedComponents(Operator):
     def _mapArray(self, roi, result, global_labels=True):
         # TODO perhaps with pixeloperator?
         assert np.all(roi.stop - roi.start == result.shape)
+
+        logger.debug("mapping roi {}".format(roi))
         indices = self._roiToChunkIndex(roi)
         for idx in indices:
             newroi = self._chunkIndexToRoi(idx)
@@ -435,7 +458,6 @@ class OpLazyConnectedComponents(Operator):
             if l == 0:
                 continue
 
-            # adding a global label is critical
             if l not in d:
                 nextLabel = labeler.next()
                 d[l] = nextLabel
@@ -523,9 +545,8 @@ class OpLazyConnectedComponents(Operator):
         shape = self._Input.meta.shape
         if self.ChunkShape.ready():
             chunkShape = (1,) + self.ChunkShape.value + (1,)
-        elif self._Input.meta.ideal_blockshape is not None:
-            # TODO choose better automatic chunk shape (this is 16 million
-            # pixels per chunk)
+        elif self._Input.meta.ideal_blockshape is not None and\
+                np.prod(self._Input.meta.ideal_blockshape) > 0:
             chunkShape = self._Input.meta.ideal_blockshape
         else:
             # TODO choose better automatic chunk shape (this is 16 million
@@ -533,6 +554,7 @@ class OpLazyConnectedComponents(Operator):
             chunkShape = (1, 256, 256, 256, 1)
         assert len(shape) == len(chunkShape),\
             "Encountered an invalid chunkShape"
+        chunkShape = np.minimum(shape, chunkShape)
         f = lambda i: shape[i]//chunkShape[i] + (1 if shape[i] % chunkShape[i]
                                                  else 0)
         self._chunkArrayShape = tuple(map(f, range(len(shape))))
@@ -559,7 +581,11 @@ class OpLazyConnectedComponents(Operator):
 
         ### local labels ###
         # cache for local labels
-        self._cache = vigra.ChunkedArrayCompressed(shape, dtype=_LABEL_TYPE)
+        # adjust cache chunk shape to our chunk shape
+        cs = tuple(map(_get_next_power, self._chunkShape))
+        logger.debug("Creating cache with chunk shape {}".format(cs))
+        self._cache = vigra.ChunkedArrayCompressed(shape, dtype=_LABEL_TYPE,
+                                                   chunk_shape=cs)
 
         ### global indices ###
         # offset (global labels - local labels) per chunk
@@ -633,6 +659,15 @@ class OpLazyConnectedComponents(Operator):
             dsroi.stop -= roi.start
             self._cache[cacheroi.toSlice()] = value[dsroi.toSlice()]
             self._isFinal[idx] = True
+
+    def _report(self):
+        m = {np.uint8: 1, np.uint16: 2, np.uint32: 4, np.uint64: 8}
+        nStoredChunks = self._isFinal.sum()
+        nChunks = self._isFinal.size
+        cachedMB = self._cache.data_bytes/1024.0**2
+        rawMB = self._cache.size * m[_LABEL_TYPE]
+        logger.info("REPORT: Currently stored chunks: {}/{} ({:.1f} MB)".format(
+            nStoredChunks, nChunks, cachedMB))
 
     # order a pair of chunk indices lexicographically
     # (ret[0] is top-left-in-front-of of ret[1])
@@ -726,3 +761,10 @@ class InfiniteLabelIterator(object):
         assert a < np.iinfo(self.dtype).max, "Label overflow."
         self.n += 1
         return a
+
+
+def _get_next_power(x, n=2):
+    a = 1
+    while a < x:
+        a *= n
+    return a
