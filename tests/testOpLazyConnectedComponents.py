@@ -173,6 +173,41 @@ class TestOpLazyCC(unittest.TestCase):
         out2 = op.Output[500:, ...].wait()
         assert out1[0, 0, 0] != out2[499, 0, 0]
 
+    def testCircular(self):
+        g = Graph()
+
+        op = OpLazyCC(graph=g)
+        op.ChunkShape.setValue((3, 3, 1))
+
+        vol = np.asarray(
+            [[0, 0, 0, 0, 0, 0, 0, 0, 0],
+             [0, 1, 1, 1, 0, 1, 1, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 1, 1, 1, 1, 1, 1, 0],
+             [0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
+        vol1 = vigra.taggedView(vol, axistags='xy')
+        vol2 = vigra.taggedView(vol, axistags='yx')
+        vol3 = vigra.taggedView(np.flipud(vol), axistags='xy')
+        vol4 = vigra.taggedView(np.flipud(vol), axistags='yx')
+
+        for v in (vol1, vol2, vol3, vol4):
+            op.Input.setValue(v)
+            for x in [0, 3, 6]:
+                for y in [0, 3, 6]:
+                    if x == 3 and y == 3:
+                        continue
+                    op.Input.setDirty(slice(None))
+                    print(op._isFinal.squeeze())
+                    out = op.Output[x:x+3, y:y+3].wait()
+                    print(x, y)
+                    print(out.squeeze())
+                    assert out.max() == 1
+                    assert False
+
     def testParallelConsistency(self):
         vol = np.zeros((1000, 100, 10))
         vol = vol.astype(np.uint8)

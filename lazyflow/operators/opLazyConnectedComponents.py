@@ -253,18 +253,22 @@ class OpLazyConnectedComponents(Operator):
         ticket = self._manager.register()
         othersToWaitFor = set()
 
+        # label this chunk
+        self._label(chunkIndex)
+
         # we want to finalize every label in our first chunk
         localLabels = np.arange(1, self._numIndices[chunkIndex]+1)
         localLabels = localLabels.astype(_LABEL_TYPE)
-        chunksToProcess = {chunkIndex: localLabels}
+        chunksToProcess = [(chunkIndex, localLabels)]
 
         while chunksToProcess:
-            currentChunk, localLabels = chunksToProcess.popitem()
-
-            # label this chunk
-            self._label(chunkIndex)
+            # Breadth-First-Search, using list as FIFO
+            currentChunk, localLabels = chunksToProcess.pop(0)
 
             # get the labels in use by this chunk
+            # (no need to label this chunk, has been done already because it
+            # was labeled as a neighbour of the last chunk, and the first chunk
+            # was labeled above)
             localLabels = np.arange(1, self._numIndices[currentChunk]+1)
             localLabels = localLabels.astype(_LABEL_TYPE)
 
@@ -282,7 +286,7 @@ class OpLazyConnectedComponents(Operator):
             for other in otherChunks:
                 self._label(other)
                 a, b = self._orderPair(currentChunk, other)
-                me = 0 if a == chunkIndex else 1
+                me = 0 if a == currentChunk else 1
                 res = self._merge(a, b)
                 myLabels, otherLabels = res[me], res[1-me]
 
@@ -296,10 +300,13 @@ class OpLazyConnectedComponents(Operator):
                 # add the neighbour to our processing queue only if it actually
                 # shares objects
                 if extendingLabels.size > 0:
+                    # TODO check if already in queue
+                    '''
                     if other in chunksToProcess:
                         extendingLabels = np.union1d(chunksToProcess[other],
                                                      extendingLabels)
-                    chunksToProcess[other] = extendingLabels
+                    '''
+                    chunksToProcess.append((other, extendingLabels))
 
         self._manager.unregister(ticket)
         return othersToWaitFor
@@ -337,10 +344,9 @@ class OpLazyConnectedComponents(Operator):
         self._numIndices[chunkIndex] = numLabels
         if numLabels > 0:
             with self._lock:
-                # get 1 label that determines the offset
+                # determine the offset
+                # localLabel + offset = globalLabel (for localLabel>0)
                 offset = self._uf.makeNewIndex()
-                # the offset is such that label 1 in the local chunk maps to
-                # 'offset' in the global context
                 self._globalLabelOffset[chunkIndex] = offset - 1
 
                 # get n-1 more labels
@@ -379,11 +385,13 @@ class OpLazyConnectedComponents(Operator):
 
         # union find manipulations are critical
         with self._lock:
-            map_a = self.localToGlobal(chunkA, mapping=True)
-            map_b = self.localToGlobal(chunkB, mapping=True)
+            map_a = self.localToGlobal(chunkA)
+            map_b = self.localToGlobal(chunkB)
             labels_a = map_a[label_hyperplane_a[adjacent_bool_inds]]
             labels_b = map_b[label_hyperplane_b[adjacent_bool_inds]]
             for a, b in zip(labels_a, labels_b):
+                assert a not in self._globalToFinal, "Invalid merge"
+                assert b not in self._globalToFinal, "Invalid merge"
                 self._uf.makeUnion(a, b)
         correspondingLabelsA = label_hyperplane_a[adjacent_bool_inds]
         correspondingLabelsB = label_hyperplane_b[adjacent_bool_inds]
@@ -393,7 +401,6 @@ class OpLazyConnectedComponents(Operator):
     # @param roi region of interest
     # @param result array of shape roi.stop - roi.start, will be filled
     def _mapArray(self, roi, result, global_labels=True):
-        # TODO perhaps with pixeloperator?
         assert np.all(roi.stop - roi.start == result.shape)
 
         logger.debug("mapping roi {}".format(roi))
@@ -417,34 +424,31 @@ class OpLazyConnectedComponents(Operator):
         newroi = self._chunkIndexToRoi(chunkIndex)
         s = newroi.toSlice()
         chunk = self._cache[s]
-        labels = self.localToGlobal(chunkIndex, mapping=True)
+        labels = self.localToGlobal(chunkIndex)
         self.globalToFinal(chunkIndex[0], chunkIndex[4], labels)
         self._cache[s] = labels[chunk]
 
         self._isFinal[chunkIndex] = True
 
-    # returns an array of global labels in use by this chunk if 'mapping' is
-    # False, a mapping of local labels to global labels otherwise
-    # if update is set to False, the labels will correspond to the originally
-    # assigned global labels, otherwise you will get the most recent results
-    # of UnionFind
-    def localToGlobal(self, chunkIndex, mapping=True, update=True):
+    # returns an array of global labels in use by this chunk. This array can be
+    # used as a mapping via
+    #   mapping = localToGlobal(...)
+    #   mapped = mapping[locallyLabeledArray]
+    # The global labels are updated to their current state according to the
+    # global UnionFind structure.
+    def localToGlobal(self, chunkIndex):
         offset = self._globalLabelOffset[chunkIndex]
         numLabels = self._numIndices[chunkIndex]
         labels = np.arange(1, numLabels+1, dtype=_LABEL_TYPE) + offset
 
-        if update:
-            labels = np.asarray(map(self._uf.findIndex, labels),
-                                dtype=_LABEL_TYPE)
+        labels = np.asarray(map(self._uf.findIndex, labels),
+                            dtype=_LABEL_TYPE)
 
-        if not mapping:
-            return labels
-        else:
-            # we got 'numLabels' real labels, and one label '0', so our
-            # output has to have numLabels+1 elements
-            out = np.zeros((numLabels+1,), dtype=_LABEL_TYPE)
-            out[1:] = labels
-            return out
+        # we got 'numLabels' real labels, and one label '0', so our
+        # output has to have numLabels+1 elements
+        out = np.zeros((numLabels+1,), dtype=_LABEL_TYPE)
+        out[1:] = labels
+        return out
 
     # map an array of global indices to final labels
     # after calling this function, the labels passed in may not be used with
@@ -461,7 +465,7 @@ class OpLazyConnectedComponents(Operator):
             if l not in d:
                 nextLabel = labeler.next()
                 d[l] = nextLabel
-            labels[labels == l] = d[l]
+            labels[labels == k] = d[l]
 
     ##########################################################################
     ##################### HELPER METHODS #####################################
@@ -575,6 +579,8 @@ class OpLazyConnectedComponents(Operator):
             else:
                 self._background_valid = True
                 self._background[:] = bg
+        else:
+            self._background_valid = True
 
         # manager object
         self._manager = _LabelManager()
@@ -715,15 +721,6 @@ class UnionFindArray(object):
 
         self._map[b] = a
 
-    def finalizeLabel(self, a):
-        raise NotImplementedError()
-
-    def makeContiguous(self):
-        raise NotImplementedError()
-
-    def nextFreeLabel(self):
-        raise NotImplementedError()
-
     @threadsafe
     def makeNewIndex(self):
         newLabel = self._nextFree
@@ -742,15 +739,11 @@ class UnionFindArray(object):
 
     def __str__(self):
         s = "<UnionFindArray>\n{}".format(self._map)
-        return s
-
-    def __getitem__(self, key):
-        raise NotImplementedError()
 
 
 class InfiniteLabelIterator(object):
 
-    def __init__(self, n, dtype=np.uint32):
+    def __init__(self, n, dtype=_LABEL_TYPE):
         if not np.issubdtype(dtype, np.integer):
             raise ValueError("Labels must have an integral type")
         self.dtype = dtype
