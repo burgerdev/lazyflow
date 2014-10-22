@@ -26,6 +26,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+filter_implementations = dict()
+
+
 class OpFilterLabels(Operator):
     """
     Given a labeled volume, discard labels that have too few pixels.
@@ -38,11 +41,91 @@ class OpFilterLabels(Operator):
     MinLabelSize = InputSlot(stype='int')
     MaxLabelSize = InputSlot(optional=True, stype='int')
     BinaryOut = InputSlot(optional=True, value = False, stype='bool')
+
+    # choose between implementations
+    # currently available: ['classic', 'lazy']
+    Method = InputSlot(value='classic')
+        
+    Output = OutputSlot()
+
+    def __init__(self, *args, **kwargs):
+        super(OpFilterLabels, self).__init__(*args, **kwargs)
+        self._configuredForMethod = None
+        self._op = None
+
+    def setupOutputs(self):
+        method = self.Method.value
+        if method not in filter_implementations.keys():
+            raise ValueError("Unknown filter implementation "
+                             "'{}'".format(method))
+
+        cls = filter_implementations[method]
+        if not issubclass(cls, OpFilterLabelsImpl):
+            raise ValueError("Implementation must descend from "
+                             "OpFilterLabelsImpl")
+
+        if self._configuredForMethod == method:
+            return
+        self._configuredForMethod = method
+
+        self._disconnectFilterOp()
+        self._connectFilterOp(cls)
+
+    def propagateDirty(self, slot, subindex, roi):
+        # dirty handling is performed by implementation operators
+        pass
+
+    def _disconnectFilterOp(self):
+        if self._op is None:
+            return
+        op = self._op
+        self._op = None
+        self.Output.disconnect()
+        op.Input.disconnect()
+        op.MinLabelSize.disconnect()
+        op.MaxLabelSize.disconnect()
+        op.BinaryOut.disconnect()
+
+    def _connectFilterOp(self, cls):
+        op = cls(parent=self)
+        op.Input.connect(self.Input)
+        op.MinLabelSize.connect(self.MinLabelSize)
+        op.MaxLabelSize.connect(self.MaxLabelSize)
+        op.BinaryOut.connect(self.BinaryOut)
+        self.Output.connect(op.Output)
+        self._op = op
+
+
+class OpFilterLabelsImpl(Operator):
+
+    Input = InputSlot() 
+    MinLabelSize = InputSlot(stype='int')
+    MaxLabelSize = InputSlot(optional=True, stype='int')
+    BinaryOut = InputSlot(optional=True, value = False, stype='bool')
         
     Output = OutputSlot()
     
     def setupOutputs(self):
         self.Output.meta.assignFrom(self.Input.meta)
+        
+    def propagateDirty(self, inputSlot, subindex, roi):
+        # all input slots can affect the entire output
+        # FIXME why is this failing for BinaryOut?
+        assert inputSlot == self.Input or inputSlot == self.MinLabelSize or inputSlot == self.MaxLabelSize
+        self.Output.setDirty( slice(None) )
+    
+
+
+class OpFilterLabelsClassic(OpFilterLabelsImpl):
+
+    ''' inherited slots
+    Input = InputSlot() 
+    MinLabelSize = InputSlot(stype='int')
+    MaxLabelSize = InputSlot(optional=True, stype='int')
+    BinaryOut = InputSlot(optional=True, value = False, stype='bool')
+        
+    Output = OutputSlot()
+    '''
         
     def execute(self, slot, subindex, roi, result):
         minSize = self.MinLabelSize.value
@@ -55,11 +138,6 @@ class OpFilterLabels(Operator):
         
         self.remove_wrongly_sized_connected_components(result, min_size=minSize, max_size=maxSize, in_place=True)
         return result
-        
-    def propagateDirty(self, inputSlot, subindex, roi):
-        # Both input slots can affect the entire output
-        assert inputSlot == self.Input or inputSlot == self.MinLabelSize or inputSlot == self.MaxLabelSize
-        self.Output.setDirty( slice(None) )
 
     def remove_wrongly_sized_connected_components(self, a, min_size, max_size, in_place):
         """
@@ -94,3 +172,4 @@ class OpFilterLabels(Operator):
             numpy.place(a,a,1)
         return numpy.array(a, dtype=original_dtype)
 
+filter_implementations['classic'] = OpFilterLabelsClassic

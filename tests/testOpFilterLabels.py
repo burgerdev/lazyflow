@@ -25,7 +25,9 @@ from lazyflow.graph import Graph
 from lazyflow.operators import OpFilterLabels
 from lazyflow.utility.slicingtools import sl, slicing2shape
 
-class TestOpFilterLabels(object):
+from unittest import TestCase, expectedFailure
+
+class TestOpFilterLabelsClassic(TestCase):
 
     def setUp(self):
 
@@ -38,10 +40,12 @@ class TestOpFilterLabels(object):
         inputData[0,2, 50:52, 50:53, 0] = 3 # 6 voxels
         
         self.inputData = inputData
+        self.method = 'classic'
 
     def testBasic(self):
         graph = Graph()
         op = OpFilterLabels(graph=graph)
+        op.Method.setValue(self.method)
         op.Input.setValue( self.inputData )
         op.MinLabelSize.setValue(6)
 
@@ -57,6 +61,16 @@ class TestOpFilterLabels(object):
         expectedData[0, 0, 50:53, 50:53, 0] = 0
         filtered2 = op.Output[:].wait()
         assert (filtered2 == expectedData).all()
+
+
+class TestOpFilterLabelsLazy(TestOpFilterLabelsClassic):
+    def setUp(self):
+        super(self.__class__, self).setUp()
+        self.method = 'lazy'
+
+    @expectedFailure
+    def testBasic(self):
+        super(self.__class__, self).testBasic()
 
 
 if __name__ == "__main__":
