@@ -32,6 +32,12 @@ from functools import partial
 
 
 def partitionRoi(roi, blockShape):
+    '''
+    straightforward partitioning function
+    @input roi the ROI which shall be partitioned
+    @param blockShape the shape of a single partition
+    @return list of SubRegion objects corresponding to partitions
+    '''
     blockShape = np.asarray(blockShape, dtype=np.int)
     blocks = getIntersectingBlocks(blockShape, (roi.start, roi.stop))
 
@@ -44,6 +50,10 @@ def partitionRoi(roi, blockShape):
 
 
 def mortonOrderIterator(shape):
+    '''
+    @param shape the array shape over which to iterate
+    @return iterator over single point indices in Morton order (Z-order)
+    '''
     n = len(shape)
     x = np.zeros((n,), dtype=np.int)
     lim = np.prod(shape)
@@ -64,6 +74,18 @@ def mortonOrderIterator(shape):
 
 
 def partitionRoiForWorkers(roi, shape, blockShape, n):
+    '''
+    Partition a ROI and distribute it for n workers. The entire volume is
+    distributed over n workers and *after that* the roi is intersected with
+    the sets for each worker. This means that a ROI will always be assigned to
+    the same worker, regardless of the remaining request.
+    
+    @param roi roi which shall be distributed
+    @param shape shape of the entire volume
+    @param blockShape shape of a single block
+    @paran n number of workers
+    @return a n-item list of lists of SubRegion objects
+    '''
     blockShape = np.asarray(blockShape, dtype=np.int)
     blocks = getIntersectingBlocks(blockShape, ((0,)*len(shape), shape),
                                    asarray=True)
@@ -92,6 +114,17 @@ def partitionRoiForWorkers(roi, shape, blockShape, n):
 
 
 def toResultRoi(roi, origin):
+    '''
+    transform an input ROI so that it can be used as result roi (in execute())
+    Example:
+    
+    def execute(self, slot, subindex, roi, result):
+        roi2 = shrinkRoi(roi)
+        data = self.Input.get(roi2)
+        result_roi = toResultRoi(roi2, roi.start)
+        result[result_roi.toSlice()] = data
+    
+    '''
     a = np.asarray(roi.start, dtype=np.int)
     b = np.asarray(roi.stop, dtype=np.int)
     o = np.asarray(origin, dtype=np.int)
@@ -103,6 +136,8 @@ def toResultRoi(roi, origin):
 class RequestStrategy(ParallelStrategyABC):
     """
     TODO doc
+    FIXME not working for Opaque output slots that return a value
+          (but do those exist, anyway?)
     """
 
     def __init__(self, blockShape):
@@ -115,13 +150,17 @@ class RequestStrategy(ParallelStrategyABC):
         rois = partitionRoi(roi, self._blockShape)
         reqs = [(slot.get(r), toResultRoi(r, roi.start)) for r in rois]
         for req, r in reqs:
-            req.writeInto(result[r.toSlice()])
+            if result is not None:
+                req.writeInto(result[r.toSlice()])
             req.submit()
         for req, r in reqs:
             req.block()
 
 
+# Using arbitrary functions as multiprocessing.Process targets is hard. We use
+# some wrappers to ensure all functions can be pickled.
 # see http://stackoverflow.com/questions/3288595/multiprocessing-using-pool-map-on-a-function-defined-in-a-class
+# TODO check whether this is still a problem
 def spawn(f):
     def fun(*args, **kwargs):
         f(*args, **kwargs)
@@ -137,6 +176,8 @@ def parmap(f, X):
 class MultiprocessingStrategy(ParallelStrategyABC):
     """
     TODO doc
+    FIXME not working for Opaque output slots that return a value
+          (but do those exist, anyway?)
     """
 
     def __init__(self, nWorkers, blockShape):
@@ -145,7 +186,8 @@ class MultiprocessingStrategy(ParallelStrategyABC):
 
     def map(self, slot, roi, result):
         """
-        partitions the ROI into blocks, starts request for each block
+        partitions the ROI into block sets for n workers, starts processes
+        for each worker
         """
         workerRois = partitionRoiForWorkers(roi, slot.meta.shape,
                                             self._blockShape, self._nWorkers)
@@ -167,7 +209,8 @@ class MultiprocessingStrategy(ParallelStrategyABC):
         n = np.sum([len(p) for p in workerRois])
         while n > 0:
             roi, res = queue.get()
-            result[roi] = res
+            if result is not None:
+                result[roi] = res
             n -= 1
         queue.close()
         [p.join() for p in procs]

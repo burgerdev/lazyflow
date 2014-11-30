@@ -22,9 +22,7 @@
 
 from abc import ABCMeta, abstractmethod
 
-from lazyflow.operator import Operator, InputSlot
-from lazyflow.stype import Opaque
-from lazyflow.rtype import SubRegion
+from lazyflow.operator import Operator
 
 
 class ParallelStrategyABC(object):
@@ -46,10 +44,8 @@ class OpMapParallel(Operator):
     Decorator for parallelizing regular operators.
 
     TODO doc
-    FIXME API for parallelizer unstable
     FIXME currently only one OutputSlot supported
-    FIXME no cconstructor args supported
-    FIXME hardcoded InputSlot for parallelizer probably bad
+    FIXME no constructor args supported
     FIXME higher-level slots not supported
     '''
 
@@ -126,89 +122,3 @@ class OpMapParallel(Operator):
         # dirtyness is handled by callback
         pass
 
-
-class OpParallel(Operator):
-    '''
-    Decorator for parallelizing regular operators.
-
-    TODO doc
-    FIXME API for parallelizer unstable
-    FIXME currently only one OutputSlot supported
-    FIXME no cconstructor args supported
-    FIXME hardcoded InputSlot for parallelizer probably bad
-    FIXME higher-level slots not supported
-    '''
-
-    # must be filled with 
-    RoiParallelizer = InputSlot(stype=Opaque)
-
-    def __init__(self, op2decorate, slot2parallelize, *args, **kwargs):
-        '''
-        @param op2decorate the class that should be decorated, will be constructed
-                        in __init__ (type: Operator)
-        @param slot2parallelize the output slot that should be parallelized
-                                (type: str)
-        '''
-
-        # parent constructor
-        super(OpParallel, self).__init__(*args, **kwargs)
-
-        # sanity checks
-        self.s2p = slot2parallelize
-        assert self.s2p in map(lambda s: s.name, op2decorate.outputSlots),\
-            "Operator {} does not have an output slot{}".format(
-                op2decorate.name, self.s2p)
-
-        # yummy copy-pasta
-
-        # replicate input slot definitions
-        for innerSlot in sorted(op2decorate.inputSlots,
-                                key=lambda s: s._global_slot_id):
-            level = innerSlot.level
-            outerSlot = innerSlot._getInstance(self, level=level)
-            self.inputs[outerSlot.name] = outerSlot
-            setattr(self, outerSlot.name, outerSlot)
-
-        # replicate output slot definitions
-        for innerSlot in sorted(op2decorate.outputSlots,
-                                key=lambda s: s._global_slot_id):
-            level = innerSlot.level
-            outerSlot = innerSlot._getInstance(self, level=level)
-            self.outputs[outerSlot.name] = outerSlot
-            setattr(self, outerSlot.name, outerSlot)
-
-        # connect decorated operator
-        op = op2decorate(parent=self)
-        for k in op.inputs:
-            if not k.startswith("_"):
-                op.inputs[k].connect(self.inputs[k])
-        for k in op.outputs:
-            if not (k.startswith("_") or k == self.s2p):
-                self.outputs[k].connect(op.outputs[k])
-                self.outputs[k].meta.NOTREADY = None
-        self._op = op
-
-        # connect dirtyness callback
-        def callWhenDirty(slot, roi):
-            self.outputs[self.s2p].setDirty(roi)
-        self._op.outputs[self.s2p].notifyDirty(callWhenDirty)
-
-    def setupOutputs(self):
-        # the slot2parallelize is not connected so we need to set the meta data
-        self.outputs[self.s2p].meta.assignFrom(
-            self._op.outputs[self.s2p].meta)
-
-    def execute(self, slot, subindex, roi, result):
-        # parallelize request
-        assert slot == self.outputs[self.s2p], "a slot wasn't wrapped"
-        fun = self.RoiParallelizer.value
-        portionedWork = fun(slot.meta, roi, result)
-        self.assignWork(portionedWork, result)
-
-    def propagateDirty(self, slot, subindex, roi):
-        # dirtyness is handled by callback
-        pass
-
-    @abstractmethod
-    def assignWork(self, portions, results):
-        pass
