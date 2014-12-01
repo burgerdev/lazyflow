@@ -51,6 +51,7 @@ except:
     loaded += os.linesep
     logger.debug(loaded)
 
+    from opImplementationChoice import OpImplementationChoice
     from opVigraWatershed import OpVigraWatershed
     from opVigraLabelVolume import OpVigraLabelVolume
     from opFilterLabels import OpFilterLabels
