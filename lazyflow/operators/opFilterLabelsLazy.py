@@ -87,7 +87,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
     def setupOutputs(self):
         super(OpFilterLabelsLazy, self).setupOutputs()
 
-        self.__labelCount = defaultdict(int)
+        self.__labelCount = defaultdict(lambda: defaultdict(int))
         self.__chunkLocks = defaultdict(Lock)
         self.__handled = set()
 
@@ -126,7 +126,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
                 # (This fix is just for VM testing.)
                 bins = np.bincount(data.astype(np.int).ravel())
             for i in range(1, len(bins)):
-                self.__labelCount[i] += bins[i]
+                self.__labelCount[(chunk[0], chunk[4])][i] += bins[i]
             f = lambda i: bins[i] > 0 and i > 0
             return set(ifilter(f, xrange(1, len(bins))))
 
@@ -156,14 +156,16 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
             
 
     def fillResult(self, roi, result):
-        lc = self.__labelCount
-        maxLabel = max(lc.keys())
-        mapping = np.arange(maxLabel+1)
-        for label in lc:
-            c = lc[label]
-            if c > self.__maxSize or c < self.__minSize:
-                mapping[label] = 0
         req = self.Input.get(roi)
         req.writeInto(result)
         req.block()
-        result[:] = mapping[result]
+        for t in range(roi.start[0], roi.stop[0]):
+            for c in range(roi.start[4], roi.stop[4]):
+                lc = self.__labelCount[(t, c)]
+                maxLabel = max(lc.keys())
+                mapping = np.arange(maxLabel+1)
+                for label in lc:
+                    n = lc[label]
+                    if n > self.__maxSize or n < self.__minSize:
+                        mapping[label] = 0
+                result[t, ..., c] = mapping[result[t, ..., c]]

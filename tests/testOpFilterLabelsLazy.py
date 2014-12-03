@@ -89,9 +89,15 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         op.MinLabelSize.setValue(8)
         out = self.five(op.Output[...].wait(),
                         tags=op.Output.meta.axistags)
-
         np.testing.assert_array_equal(out,
                                       self.vol)
+
+        op.MinLabelSize.setValue(7)
+        op.MinLabelSize.setValue(8)
+        out = self.five(op.Output[0, :5, :5, :, 0].wait(),
+                        tags=op.Output.meta.axistags)
+        np.testing.assert_array_equal(out,
+                                      self.vol[:1, :5, :5, :, :1])
 
         op.MinLabelSize.setValue(9)
         out = self.five(op.Output[...].wait(),
@@ -131,4 +137,28 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         # -> 4 for single chunk handling, 3*2 for hyperplanes
         #    1 for result
         np.testing.assert_equal(self.counter.count, 11)
-        
+
+    def testMultiDim(self):
+        vol = self.vol.withAxes(*'xyz')
+        vol5d = np.zeros((2,) + vol.shape + (2,), dtype=vol.dtype)
+        for t in range(vol5d.shape[0]):
+            for c in range(vol5d.shape[-1]):
+                vol5d[t, ..., c] = vol
+        vol5d = self.five(vol5d, tags='txyzc')
+
+        op = self.op
+        op.Input.disconnect()
+        op.Input.setValue(vol5d)
+
+        op.MinLabelSize.setValue(8)
+        out = self.five(op.Output[:, :5, :5, :5, :].wait(),
+                        tags=op.Output.meta.axistags)
+        ref = vol5d[:, :5, :5, :5, :]
+        np.testing.assert_array_equal(out, ref)
+
+        op.MinLabelSize.setValue(9)
+        out = self.five(op.Output[:, :5, :5, :5, :].wait(),
+                        tags=op.Output.meta.axistags)
+        ref = self.five(np.zeros_like(out),
+                        tags=op.Output.meta.axistags)
+        np.testing.assert_array_equal(out, ref)
