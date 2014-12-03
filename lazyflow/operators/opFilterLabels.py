@@ -26,6 +26,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class OpLabelFilteringABC(Operator):
+    '''
+    abstract base class for filtering operators
+    '''
+
+    Input = InputSlot() 
+    MinLabelSize = InputSlot(stype='int')
+    MaxLabelSize = InputSlot(optional=True, stype='int')
+    BinaryOut = InputSlot(optional=True, value = False, stype='bool')
+
+    Output = OutputSlot()
+
+
 class OpFilterLabels(Operator):
     """
     Given a labeled volume, discard labels that have too few pixels.
