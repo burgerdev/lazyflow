@@ -32,6 +32,8 @@ from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.operators.opParallel import OpMapParallel
 from lazyflow.operators.opParallelImplementations import RequestStrategy
 from lazyflow.operators.opParallelImplementations import MultiprocessingStrategy
+from lazyflow.operators.opParallelImplementations import MPIStrategy
+from lazyflow.operators.opParallelImplementations import have_mpi
 
 from lazyflow.operators.opParallelImplementations import partitionRoi
 from lazyflow.operators.opParallelImplementations import partitionRoiForWorkers
@@ -153,3 +155,25 @@ class TestStrategies(unittest.TestCase):
         res = op.Output[sl].wait()
         res = vigra.taggedView(res, axistags=op.Output.meta.axistags)
         np.testing.assert_array_equal(res, self.res[sl])
+
+    @unittest.skipIf(not have_mpi, "No MPI available")
+    def testMPIStrategy(self):
+        from mpi4py import MPI
+        rank = MPI.COMM_WORLD.rank
+        if MPI.COMM_WORLD.size < 2:
+            raise unittest.SkipTest("Test probably not run with mpiexec")
+        strat = MPIStrategy((30, 25, 45))
+        op = OpMapParallel(OpToTest, "Output", strat, graph=Graph())
+        op.Input.setValue(self.vol)
+
+        res = op.Output[...].wait()
+        res = vigra.taggedView(res, axistags=op.Output.meta.axistags)
+        x, y, z = np.where(res!=self.res)
+        if rank == 0:
+            np.testing.assert_array_equal(res, self.res)
+
+        sl = SubRegion(None, start=(10, 20, 30), stop=(41, 42, 43)).toSlice()
+        res = op.Output[sl].wait()
+        res = vigra.taggedView(res, axistags=op.Output.meta.axistags)
+        if rank == 0:
+            np.testing.assert_array_equal(res, self.res[sl])

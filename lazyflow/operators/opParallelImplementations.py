@@ -214,3 +214,67 @@ class MultiprocessingStrategy(ParallelStrategyABC):
             n -= 1
         queue.close()
         [p.join() for p in procs]
+
+
+try:
+    from mpi4py import MPI
+except ImportError:
+    have_mpi = False
+else:
+    have_mpi = True
+
+
+class MPIStrategy(ParallelStrategyABC):
+    """
+    TODO doc
+    FIXME not working for Opaque output slots that return a value
+          (but do those exist, anyway?)
+    """
+
+    def __init__(self, blockShape):
+        assert have_mpi, "Could not load mpi4py"
+        self._blockShape = blockShape
+
+    def map(self, slot, roi, result):
+        """
+        use MPI ranks 1-n for computation, rank 0 for receiving messages
+        and further computations
+        """
+        comm = MPI.COMM_WORLD
+        total = comm.size
+        assert total > 1, "Need more than 1 process to use MPIStrategy"
+        me = comm.rank
+        workerRois = partitionRoiForWorkers(roi, slot.meta.shape,
+                                            self._blockShape,
+                                            total - 1)
+
+        if me == 0:
+            numBlocks = sum(len(x) for x in workerRois)
+            self._receive(result, numBlocks)
+            return
+        else:
+            offset = sum(len(x) for x in workerRois[:me-2])
+            myRois = workerRois[me - 1]
+
+        origin = roi.start
+        count = 0
+        for roi in myRois:
+            req = slot.get(roi)
+            res = req.wait()
+            resroi = toResultRoi(roi, origin).toSlice()
+            # TODO use array slices and Ibsend/Recv
+            comm.send((resroi, res), dest=0, tag=offset+count)
+            count += 1
+
+    def _receive(self, result, n):
+        '''
+        only the root process is receiving data
+        '''
+        comm = MPI.COMM_WORLD
+        assert comm.rank == 0
+        while n > 0:
+            # TODO handle errors in workers
+            sl, block = comm.recv(source=MPI.ANY_SOURCE,
+                                  tag=MPI.ANY_TAG)
+            result[sl] = block
+            n -= 1
