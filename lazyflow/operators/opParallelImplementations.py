@@ -276,5 +276,6 @@ class MPIStrategy(ParallelStrategyABC):
             # TODO handle errors in workers
             sl, block = comm.recv(source=MPI.ANY_SOURCE,
                                   tag=MPI.ANY_TAG)
-            result[sl] = block
+            if result is not None:
+                result[sl] = block
             n -= 1

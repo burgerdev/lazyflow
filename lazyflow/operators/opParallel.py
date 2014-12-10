@@ -45,6 +45,7 @@ class OpMapParallel(Operator):
 
     TODO doc
     FIXME currently only one OutputSlot supported
+    FIXME opaque output is ignored
     FIXME no constructor args supported
     FIXME higher-level slots not supported
     '''
@@ -91,6 +92,7 @@ class OpMapParallel(Operator):
 
         # connect decorated operator
         op = op2decorate(parent=self)
+
         for k in op.inputs:
             if not k.startswith("_"):
                 op.inputs[k].connect(self.inputs[k])
@@ -122,3 +124,5 @@ class OpMapParallel(Operator):
         # dirtyness is handled by callback
         pass
 
+    def getWrappedOperator(self):
+        return self._op
