@@ -49,7 +49,7 @@ class OpExecuteCounter(Operator):
 
 class TestOpFilterLabelsLazy(unittest.TestCase):
     def setUp(self):
-        self.chunkShape = (1, 5, 5, 5, 1)
+        self.chunkShape = (5, 5, 5)
         vol = np.zeros((20, 20, 20), dtype=np.uint32)
         # 8 pix in 1 chunk
         vol[1:3, 1:3, 1:3] = 1

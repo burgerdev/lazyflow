@@ -28,6 +28,7 @@ from itertools import ifilter
 
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.operators.opFilterLabels import OpLabelFilteringABC
+from lazyflow.operators.opLazyConnectedComponents import OpLazyConnectedComponents
 
 import logging
 logger = logging.getLogger(__name__)
@@ -82,9 +83,21 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         return self.Input.meta.shape
 
     def chunkShape(self):
-        return self.ChunkShape.value
+        return self._chunkShape
 
     def setupOutputs(self):
+
+        # determine chunk shape first, because the parent class needs it
+        if self.ChunkShape.ready():
+            chunkShape = (1,) + self.ChunkShape.value + (1,)
+        elif self._Input.meta.ideal_blockshape is not None and\
+                np.prod(self._Input.meta.ideal_blockshape) > 0:
+            chunkShape = self._Input.meta.ideal_blockshape
+        else:
+            chunkShape = OpLazyConnectedComponents._automaticChunkShape(
+                self._Input.meta.shape)
+        self._chunkShape = chunkShape
+
         super(OpFilterLabelsLazy, self).setupOutputs()
 
         self.__labelCount = defaultdict(lambda: defaultdict(int))
