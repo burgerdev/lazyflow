@@ -259,6 +259,7 @@ class MPIStrategy(ParallelStrategyABC):
         origin = roi.start
         count = 0
         for roi in myRois:
+            print("{}: {}".format(me, str(roi)))
             req = slot.get(roi)
             res = req.wait()
             resroi = toResultRoi(roi, origin).toSlice()

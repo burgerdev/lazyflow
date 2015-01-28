@@ -54,7 +54,7 @@ class OpMapParallel(Operator):
                  *args, **kwargs):
         '''
         @param op2decorate the class that should be decorated, will be
-                           constructed in __init__ (type: Operator)
+                           constructed in __init__ (type: subclass of Operator)
         @param slot2parallelize the output slot that should be parallelized
                                 (type: str)
         @param strategy a parallelization strategy (type: ParallelStrategyABC)
