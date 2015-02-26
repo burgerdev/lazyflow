@@ -88,6 +88,7 @@ class OpImplementationChoice(Operator):
             choiceSlot = self.defaultChoiceSlot
         s = InputSlot(stype='str')
         self.inputs[choiceSlot] = s._getInstance(self)
+        self._Implementation = self.inputs[choiceSlot]
 
         super(OpImplementationChoice, self).__init__(*args, **kwargs)
 
@@ -119,7 +120,7 @@ class OpImplementationChoice(Operator):
             self.outputs[k].meta.NOTREADY = True
 
     def setupOutputs(self):
-        impl = self.Implementation.value
+        impl = self._Implementation.value
         if impl == self._current_impl:
             return
 

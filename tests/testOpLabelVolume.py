@@ -1,3 +1,25 @@
+###############################################################################
+#   lazyflow: data flow based lazy parallel computation framework
+#
+#       Copyright (C) 2011-2014, the ilastik developers
+#                                <team@ilastik.org>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the Lesser GNU General Public License
+# as published by the Free Software Foundation; either version 2.1
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# See the files LICENSE.lgpl2 and LICENSE.lgpl3 for full text of the
+# GNU Lesser General Public License version 2.1 and 3 respectively.
+# This information is also available on the ilastik web site at:
+#		   http://ilastik.org/license/
+###############################################################################
+
 import numpy as np
 import vigra
 
@@ -10,11 +32,7 @@ from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.utility.testing import assertEquivalentLabeling
 
-from numpy.testing import assert_array_equal, assert_array_almost_equal
-
-from lazyflow.operators.opLabelVolume import haveBlocked
-
-from multiprocessing import Process
+from numpy.testing import assert_array_equal
 
 
 class TestVigra(unittest.TestCase):
@@ -36,7 +54,7 @@ class TestVigra(unittest.TestCase):
         assert_array_equal(vol.shape, out.shape)
 
     def testCorrectLabeling(self):
-        vol = np.zeros((1000, 100, 10))
+        vol = np.zeros((200, 100, 10))
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='xyz')
 
@@ -107,28 +125,28 @@ class TestVigra(unittest.TestCase):
                 assertEquivalentLabeling(blocks[..., c, t], out[..., c, t])
 
     def testConsistency(self):
-        vol = np.zeros((1000, 100, 10))
+        vol = np.zeros((100, 50, 10))
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='xyz')
-        vol[:200, ...] = 1
-        vol[800:, ...] = 1
+        vol[:20, ...] = 1
+        vol[80:, ...] = 1
 
         op = OpLabelVolume(graph=Graph())
         op.Method.setValue(self.method)
         op.Input.setValue(vol)
 
-        out1 = op.CachedOutput[:500, ...].wait()
-        out2 = op.CachedOutput[500:, ...].wait()
-        assert out1[0, 0, 0] != out2[499, 0, 0]
+        out1 = op.CachedOutput[:50, ...].wait()
+        out2 = op.CachedOutput[50:, ...].wait()
+        assert out1[0, 0, 0] != out2[49, 0, 0]
 
     def testNoRecomputation(self):
         g = Graph()
 
-        vol = np.zeros((1000, 100, 10))
+        vol = np.zeros((100, 50, 10))
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='xyz')
-        vol[:200, ...] = 1
-        vol[800:, ...] = 1
+        vol[:20, ...] = 1
+        vol[80:, ...] = 1
 
         opCount = CountExecutes(graph=g)
         opCount.Input.setValue(vol)
@@ -137,19 +155,19 @@ class TestVigra(unittest.TestCase):
         op.Method.setValue(self.method)
         op.Input.connect(opCount.Output)
 
-        out1 = op.CachedOutput[:500, ...].wait()
-        out2 = op.CachedOutput[500:, ...].wait()
+        op.CachedOutput[:50, ...].wait()
+        op.CachedOutput[50:, ...].wait()
 
         assert opCount.numExecutes == 1
 
     def testCorrectBlocking(self):
         g = Graph()
         c, t = 2, 3
-        vol = np.zeros((1000, 100, 10, 2, 3))
+        vol = np.zeros((100, 50, 10, 2, 3))
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='xyzct')
-        vol[:200, ...] = 1
-        vol[800:, ...] = 1
+        vol[:20, ...] = 1
+        vol[80:, ...] = 1
 
         opCount = CountExecutes(graph=g)
         opCount.Input.setValue(vol)
@@ -158,8 +176,8 @@ class TestVigra(unittest.TestCase):
         op.Method.setValue(self.method)
         op.Input.connect(opCount.Output)
 
-        out1 = op.CachedOutput[:500, ...].wait()
-        out2 = op.CachedOutput[500:, ...].wait()
+        op.CachedOutput[:50, ...].wait()
+        op.CachedOutput[50:, ...].wait()
 
         assert opCount.numExecutes == c*t
 
@@ -201,8 +219,6 @@ class TestVigra(unittest.TestCase):
         vol = np.zeros((5, 2, 200, 100, 10))
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='tcxyz')
-        vol[:200, ...] = 1
-        vol[800:, ...] = 1
 
         op = OpLabelVolume(graph=g)
         op.Method.setValue(self.method)
@@ -222,7 +238,7 @@ class TestVigra(unittest.TestCase):
         opCheck.Input.connect(op.CachedOutput)
         opCheck.willBeDirty(1, 1)
 
-        out = op.Output[...].wait()
+        op.Output[...].wait()
 
         roi = SubRegion(op.Input,
                         start=(1, 1, 0, 0, 0),
@@ -244,7 +260,7 @@ class TestVigra(unittest.TestCase):
             op.Input.setValue(vol)
 
     def testBackground(self):
-        vol = np.zeros((1000, 100, 10))
+        vol = np.zeros((200, 100, 10))
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='xyz')
 
@@ -256,8 +272,8 @@ class TestVigra(unittest.TestCase):
         op.Input.setValue(vol)
 
         out = op.Output[...].wait()
-        tags = op.Output.meta.getTaggedShape()
-        out = vigra.taggedView(out, axistags="".join([s for s in tags]))
+        tags = op.Output.meta.axistags
+        out = vigra.taggedView(out, axistags=tags)
 
         assert np.all(out[20:40, 10:30, 2:4] == 0)
         assertEquivalentLabeling(1-vol, out)
@@ -269,42 +285,6 @@ class TestVigra(unittest.TestCase):
         assert len(vol.shape) == 5
         assert vol.shape[3] == 3
         assert vol.shape[4] == 4
-        #op = OpLabelVolume(graph=Graph())
-        op.Method.setValue(self.method)
-        bg = np.asarray([[1, 0, 1, 0],
-                         [0, 1, 0, 1],
-                         [1, 0, 0, 1]], dtype=np.uint8)
-        bg = vigra.taggedView(bg, axistags='ct')
-        assert len(bg.shape) == 2
-        assert bg.shape[0] == 3
-        assert bg.shape[1] == 4
-        op.Background.setValue(bg)
-        op.Input.setValue(vol)
-
-        for c in range(bg.shape[0]):
-            for t in range(bg.shape[1]):
-                out = op.Output[..., c, t].wait()
-                out = vigra.taggedView(out, axistags=op.Output.meta.axistags)
-                if bg[c, t]:
-                    assertEquivalentLabeling(1-vol[..., c, t], out.squeeze())
-                else:
-                    assertEquivalentLabeling(vol[..., c, t], out.squeeze())
-
-
-if haveBlocked():
-    class TestBlocked(TestVigra):
-
-        def setUp(self):
-            self.method = np.asarray(['blocked'], dtype=np.object)
-
-        #@unittest.skip("Not implemented yet")
-        #def testUnsupported(self):
-            #pass
-
-        # background value is unsupported for blocked labeling
-        @unittest.expectedFailure
-        def testBackground(self):
-            super(TestBlocked, self).testBackground()
 
 
 class TestLazy(TestVigra):

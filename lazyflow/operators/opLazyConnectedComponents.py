@@ -226,7 +226,7 @@ class OpLazyConnectedComponents(Operator):
 
     # background with axes 'txyzc', spatial axes must be singletons
     # (this layout is needed to be compatible with OpLabelVolume)
-    Background = InputSlot(optional=True)
+    Background = InputSlot(value=0)
 
     # the labeled output, internally cached (the two slots are the same)
     Output = OutputSlot()
@@ -407,9 +407,7 @@ class OpLazyConnectedComponents(Operator):
         inputChunk = inputChunk.withAxes(*'xyz')
 
         # label the raw data
-        assert self._background_valid,\
-            "Background values are configured incorrectly"
-        bg = self._background[chunkIndex[0], chunkIndex[4]]
+        bg = self._background
         # a vigra bug forces us to convert to int here
         bg = int(bg)
         # TODO use labelMultiArray once available
@@ -646,21 +644,7 @@ class OpLazyConnectedComponents(Operator):
         self._shape = shape
 
         # determine the background values
-        self._background = np.zeros((shape[0], shape[4]),
-                                    dtype=self.Input.meta.dtype)
-        if self.Background.ready():
-            bg = self.Background[...].wait()
-            bg = vigra.taggedView(bg, axistags="txyzc").withAxes('t', 'c')
-            # we might have an old value set for the background value
-            # ignore it until it is configured correctly, or execute is called
-            if bg.size > 1 and \
-                    (shape[0] != bg.shape[0] or shape[4] != bg.shape[1]):
-                self._background_valid = False
-            else:
-                self._background_valid = True
-                self._background[:] = bg
-        else:
-            self._background_valid = True
+        self._background = self.Background.value
 
         # manager object
         self._manager = _LabelManager()

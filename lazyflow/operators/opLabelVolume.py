@@ -1,5 +1,25 @@
+###############################################################################
+#   lazyflow: data flow based lazy parallel computation framework
+#
+#       Copyright (C) 2011-2014, the ilastik developers
+#                                <team@ilastik.org>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the Lesser GNU General Public License
+# as published by the Free Software Foundation; either version 2.1
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# See the files LICENSE.lgpl2 and LICENSE.lgpl3 for full text of the
+# GNU Lesser General Public License version 2.1 and 3 respectively.
+# This information is also available on the ilastik web site at:
+#		   http://ilastik.org/license/
+###############################################################################
 
-from threading import Lock as ThreadLock
 from functools import partial
 from abc import ABCMeta, abstractmethod, abstractproperty
 import logging
@@ -10,13 +30,16 @@ import vigra
 from lazyflow.operator import Operator
 from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
-from lazyflow.metaDict import MetaDict
 from lazyflow.request import Request, RequestPool
 from lazyflow.operators import OpCompressedCache, OpReorderAxes
 from opLazyConnectedComponents import OpLazyConnectedComponents
+from opImplementationChoice import OpImplementationChoice
 
 logger = logging.getLogger(__name__)
 
+# add your labeling implementations dynamically to this dict
+# (vigra is added below)
+labeling_implementations = {'lazy': OpLazyConnectedComponents}
 
 ## OpLabelVolume - the **unified** connected components operator
 #
@@ -27,24 +50,18 @@ class OpLabelVolume(Operator):
     name = "OpLabelVolume"
 
     ## provide the volume to label here
-    # (arbitrary shape, dtype could be restricted, see the implementations
+    # (arbitrary shape, dtype could be restricted, see the implementations'
     # property supportedDtypes below)
     Input = InputSlot()
 
-    ## provide labels that are treated as background
-    # the shape of the background labels must match the shape of the volume in
-    # channel and in time axis, and must have no spatial axes.
-    # E.g.: volume.taggedShape = {'x': 10, 'y': 12, 'z': 5, 'c': 3, 't': 100}
-    # ==>
-    # background.taggedShape = {'c': 3, 't': 100}
-    #TODO relax requirements (single value is already working)
-    Background = InputSlot(optional=True)
+    ## provide label that is treated as background
+    Background = InputSlot(value=0)
 
     ## decide which CCL method to use
     #
-    # currently available:
+    # currently available (see module variable labeling_implementations):
     # * 'vigra': use the fast algorithm from ukoethe/vigra
-    # * 'blocked': use the memory saving algorithm from thorbenk/blockedarray
+    # * 'lazy': use the lazy algorihm OpLazyConnectedComponents
     #
     # A change here deletes all previously cached results.
     Method = InputSlot(value='vigra')
@@ -52,21 +69,18 @@ class OpLabelVolume(Operator):
     ## Labeled volume
     # Axistags and shape are the same as on the Input, dtype is an integer
     # datatype.
-    # This slot operates on a what-you-request-is-what-you-get basis, if you
-    # request a subregion only that subregion will be considered for labeling
-    # and no internal caches are used. If you want consistent labels for
-    # subsequent requests, use CachedOutput instead.
-    # This slot will be set dirty by time and channel if the background or the
-    # input changes for the respective time-channel-slice.
+    # This slots behaviour depends on the labeling implementation used, see
+    # their documentation for details. In general, it is advised to always use
+    # CachedOutput to avoid recomputation, and this slot is only kept for
+    # backwards compatibility.
     Output = OutputSlot()
 
     ## Cached label image
     # Axistags and shape are the same as on the Input, dtype is an integer
     # datatype.
-    # This slot extends the ROI to the full xyz volume (c and t are unaffected)
-    # and computes the labeling for the whole volume. As long as the input does
-    # not get dirty, subsequent requests to this slot guarantee consistent
-    # labelings. The internal cache in use is an OpCompressedCache.
+    # This slot guarantees to give consistent results for subsequent requests.
+    # For other behaviour, see the documentation of the underlying 
+    # implementation.
     # This slot will be set dirty by time and channel if the background or the
     # input changes for the respective time-channel-slice.
     CachedOutput = OutputSlot()
@@ -85,34 +99,28 @@ class OpLabelVolume(Operator):
         op5.AxisOrder.setValue('txyzc')
         self._op5 = op5
 
-        self._opLabel = None
+        self._opLabel = OpImplementationChoice(
+            OpLabelingABC,
+            parent=self,
+            implementations=labeling_implementations,
+            choiceSlot="Method")
+        self._opLabel.Input.connect(self._op5.Output)
+        self._opLabel.Background.connect(self.Background)
+        self._opLabel.Method.connect(self.Method)
+        self._opLabel.InputHdf5.connect(self.InputHdf5)
+
+        self.CleanBlocks.connect(self._opLabel.CleanBlocks)
+        self.OutputHdf5.connect(self._opLabel.OutputHdf5)
 
         self._op5_2 = OpReorderAxes(parent=self)
         self._op5_2_cached = OpReorderAxes(parent=self)
+        self._op5_2.Input.connect(self._opLabel.Output)
+        self._op5_2_cached.Input.connect(self._opLabel.CachedOutput)
 
         self.Output.connect(self._op5_2.Output)
         self.CachedOutput.connect(self._op5_2_cached.Output)
 
-        # available OpLabelingABCs:
-        self._labelOps = {'vigra': _OpLabelVigra,
-                          'blocked': _OpLabelBlocked,
-                          'lazy': OpLazyConnectedComponents}
-
     def setupOutputs(self):
-
-        if self._opLabel is not None:
-            # fully remove old labeling operator
-            self._op5_2.Input.disconnect()
-            self._op5_2_cached.Input.disconnect()
-            self._opLabel.Input.disconnect()
-            del self._opLabel
-
-        method = self.Method.value
-        if not isinstance(method, str):
-            method = method[0]
-
-        self._opLabel = self._labelOps[method](parent=self)
-        self._opLabel.Input.connect(self._op5.Output)
 
         # connect reordering operators
         self._op5_2.Input.connect(self._opLabel.Output)
@@ -123,14 +131,6 @@ class OpLabelVolume(Operator):
         self._op5_2.AxisOrder.setValue(origOrder)
         self._op5_2_cached.AxisOrder.setValue(origOrder)
 
-        # connect cache access slots
-        self._opLabel.InputHdf5.connect(self.InputHdf5)
-        self.OutputHdf5.connect(self._opLabel.OutputHdf5)
-        self.CleanBlocks.connect(self._opLabel.CleanBlocks)
-
-        # set background values
-        self._setBG()
-
     def propagateDirty(self, slot, subindex, roi):
         if slot == self.Method:
             # We are changing the labeling method. In principle, the labelings
@@ -139,10 +139,6 @@ class OpLabelVolume(Operator):
         elif slot == self.Input:
             # handled by internal operator
             pass
-        elif slot == self.Background:
-            # propagate the background values, output will be set dirty in 
-            # internal operator
-            self._setBG()
 
     def setInSlot(self, slot, subindex, roi, value):
         assert slot == self.InputHdf5,\
@@ -150,25 +146,6 @@ class OpLabelVolume(Operator):
         # Nothing to do here.
         # Our Input slots are directly fed into the cache,
         #  so all calls to __setitem__ are forwarded automatically
-
-    ## set the background values of inner operator
-    def _setBG(self):
-        if self.Background.ready():
-            val = self.Background.value
-        else:
-            val = 0
-        bg = np.asarray(val)
-        t = self._op5.Output.meta.shape[0]
-        c = self._op5.Output.meta.shape[4]
-        if bg.size == 1:
-            bg = np.zeros((c, t))
-            bg[:] = val
-            bg = vigra.taggedView(bg, axistags='ct')
-        else:
-            bg = vigra.taggedView(val, axistags=self.Background.meta.axistags)
-            bg = bg.withAxes(*'ct')
-        bg = bg.withAxes(*'txyzc')
-        self._opLabel.Background.setValue(bg)
 
 
 ## parent class for all connected component labeling implementations
@@ -178,8 +155,8 @@ class OpLabelingABC(Operator):
     ## input with axes 'txyzc'
     Input = InputSlot()
 
-    ## background with axes 'txyzc', spatial axes must be singletons
-    Background = InputSlot()
+    ## background value
+    Background = InputSlot(optional=True)
 
     Output = OutputSlot()
     CachedOutput = OutputSlot()
@@ -253,16 +230,7 @@ class OpLabelingABC(Operator):
 
     def _label(self, roi, result):
         result = vigra.taggedView(result, axistags=self.Output.meta.axistags)
-        # get the background values
-        bg = self.Background[...].wait()
-        bg = vigra.taggedView(bg, axistags=self.Background.meta.axistags)
-        bg = bg.withAxes(*'ct')
-        assert np.all(self.Background.meta.shape[0] ==
-                      self.Input.meta.shape[0]),\
-            "Shape of background values incompatible to shape of Input"
-        assert np.all(self.Background.meta.shape[4] ==
-                      self.Input.meta.shape[4]),\
-            "Shape of background values incompatible to shape of Input"
+        bg = self.Background.value
 
         # do labeling in parallel over channels and time slices
         pool = RequestPool()
@@ -277,7 +245,7 @@ class OpLabelingABC(Operator):
                                    start=tuple(start), stop=tuple(stop))
                 resView = result[ti, ..., ci].withAxes(*'xyz')
                 req = Request(partial(self._label3d, newRoi,
-                                      bg[c, t], resView))
+                                      bg, resView))
                 pool.add(req)
 
         logger.debug(
@@ -311,107 +279,4 @@ class _OpLabelVigra(OpLabelingABC):
             result[..., 0] = vigra.analysis.labelImageWithBackground(
                 source[..., 0], background_value=int(bg))
 
-
-# try to import the blockedarray module, fail only if neccessary
-try:
-    from blockedarray import OpBlockedConnectedComponents
-    raise ImportError("blockedarray not supported")
-except ImportError as e:
-    _blockedarray_module_available = False
-    _importMsg = str(e)
-    class OpBlockedConnectedComponents(object):
-        pass
-else:
-    _blockedarray_module_available = True
-    _importMsg = "No error, importing blockedarray worked."
-
-def haveBlocked():
-    return _blockedarray_module_available
-
-
-## Wrapper for blockedarray.OpBlockedConnectedComponents
-# This wrapper takes care that the module is indeed imported, and sets the
-# block shape for the cache.
-# TODO this operator does not conform to OpLabelingABC
-class _OpLabelBlocked(OpBlockedConnectedComponents):
-    name = "OpLabelBlocked"
-
-    def _updateSlice(self, c, t, bg):
-        assert _blockedarray_module_available,\
-            "Failed to import blockedarray. Message was: {}".format(_importMsg)
-
-        blockShape = _findBlockShape(self.Input.meta.shape[:3]) + (1, 1)
-        logger.debug("{}: Using blockshape {}".format(self.name, blockShape))
-        self._cache.BlockShape.setValue(blockShape)
-        super(_OpLabelBlocked, self)._updateSlice(c, t, bg)
-
-
-## find a good block shape for given input shape
-# Set the block shape such that it
-#  (a) divides the volume shape evenly
-#  (b) is smaller than a given maximum (500 == 1GB per xyz-block)
-#  (c) is maximal for all block shapes satisfying (a) and (b)
-#
-# + This problem is guaranteed to have a solution
-# - The solution might be (1,1,1), in case your volume has a prime-number shape
-#   in all axes and these are larger than blockMax.
-#
-# @param inshape array with size 3
-# @param blockMax single integer (see above)
-def _findBlockShape(inshape, blockMax=500):
-    shape = [1, 1, 1]
-    for i in range(3):
-        n = inshape[i]
-        facts = _combine(_factorize(n))
-        facts.sort()
-        m = 1
-        for f in facts:
-            if f < blockMax:
-                m = f
-            else:
-                break
-
-            shape[i] = m
-    return tuple(shape)
-
-
-_primes = [
-    2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
-    73, 79, 83, 89, 97, 101,    103, 107, 109, 113, 127, 131, 137, 139, 149,
-    151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229,
-    233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307, 311, 313,
-    317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409,
-    419, 421, 431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499]
-
-
-def _factorize(n):
-    '''
-    factorize an integer, return list of prime factors (up to 499)
-    '''
-    maxP = int(np.sqrt(n))
-    for p in _primes:
-        if p > maxP:
-            return [n]
-        if n % p == 0:
-            ret = _factorize(n//p)
-            ret.append(p)
-            return ret
-    assert False, "How did you get here???"
-
-
-def _combine(f):
-    '''
-    possible combinations of factors of f
-    '''
-
-    if len(f) < 2:
-        return f
-    ret = []
-    for i in range(len(f)):
-        n = f.pop(0)
-        sub = _combine(f)
-        ret += sub
-        for s in sub:
-            ret.append(s*n)
-        f.append(n)
-    return ret
+labeling_implementations['vigra'] = _OpLabelVigra
