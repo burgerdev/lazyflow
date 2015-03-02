@@ -38,9 +38,8 @@ from lazyflow.request import RequestPool
 from lazyflow.roi import sliceToRoi, roiToSlice, getBlockBounds, TinyVector
 from lazyflow.graph import InputSlot, OutputSlot
 from lazyflow.utility import fastWhere
-from lazyflow.operators.opCache import OpCache
-from lazyflow.operators.opArrayPiper import OpArrayPiper
-from lazyflow.operators.arrayCacheMemoryMgr import ArrayCacheMemoryMgr, MemInfoNode
+from lazyflow.operators.opCache import OpManagedCache
+from lazyflow.operators.arrayCacheMemoryMgr import ArrayCacheMemoryMgr
 
 try:
     from lazyflow.drtile import drtile
@@ -49,7 +48,7 @@ except ImportError:
     has_drtile = False
 
 
-class OpArrayCache(OpCache):
+class OpArrayCache(OpManagedCache):
     """ Allocates a block of memory as large as Input.meta.shape (==Output.meta.shape)
         with the same dtype in order to be able to cache results.
         
@@ -139,6 +138,12 @@ class OpArrayCache(OpCache):
         report.dtype = self.Output.meta.dtype
         report.type = type(self)
         report.id = id(self)
+
+    def freeMemory(self):
+        return self._freeMemory()
+
+    def getChildren(self):
+        return []
 
     def _freeMemory(self, refcheck = True):
         with self._cacheLock:

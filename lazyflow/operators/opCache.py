@@ -22,6 +22,7 @@
 #lazyflow
 from lazyflow.graph import Operator
 from lazyflow.operators.arrayCacheMemoryMgr import ArrayCacheMemoryMgr
+from lazyflow.operators.cacheMemoryManager import CacheMemoryManager
 
 class OpCache(Operator):
     """Implements the interface for a caching operator
@@ -42,7 +43,7 @@ class OpCache(Operator):
         return 0 #overwrite me
 
     def lastAccessTime(self):
-        """timestamp of last access (time.time())"""
+        """unix timestamp of last access to this operator or any child"""
         return 0 #overwrite me
     
     def _after_init(self):
@@ -55,3 +56,33 @@ class OpCache(Operator):
         # Otherwise it isn't safe for the manager to poll our stats.
         if self.parent is None or not isinstance(self.parent, OpCache):
             ArrayCacheMemoryMgr.instance.addNamedCache(self)
+
+
+class OpManagedCache(OpCache):
+    """
+    Operators that derive from this operator are managed by CacheMemoryManager
+    """
+
+    def getChildren(self):
+        '''
+        get all (graph-)children of this operator that are also OpManagedCaches
+        '''
+        raise NotImplementedError()
+
+    def freeMemory(self):
+        '''
+        free *all* memory used for caching, including children's
+        '''
+        raise NotImplementedError()
+
+    def _after_init(self):
+        """
+        additionally to Operator._after_init, add the cache to the manager
+        """
+        # explicitly leave out OpCache._after_init()!
+        super( OpCache, self )._after_init()
+
+        # Register with the manager here, AFTER we're fully initialized
+        # Otherwise it isn't safe for the manager to poll our stats.
+        if self.parent is None or not isinstance(self.parent, OpManagedCache):
+            CacheMemoryManager().addCache(self)
