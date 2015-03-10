@@ -22,6 +22,7 @@
 
 import weakref
 import gc
+import unittest
 
 import nose
 from lazyflow import graph
@@ -634,6 +635,9 @@ class OpSimple(graph.Operator):
     def setupOutputs(self):
         pass
 
+    def propagateDirty(self, slot, subindex, roi):
+        self.Output.setDirty(roi)
+
 
 class TestOperatorCleanup(object):
     def testSimpleCleanup(self):
@@ -658,6 +662,72 @@ class TestOperatorCleanup(object):
         gc.collect()
         assert r() is None, "cleanup failed"
 
+
+def assertEqual(a, b):
+    assert a == b, "{} =!= {}".format(str(a), str(b))
+
+
+class TestSlotPriority(unittest.TestCase):
+    def testSimple(self):
+        g = graph.Graph()
+        op = OpSimple(graph=g)
+        assertEqual(op.Input.priority, 0)
+        assertEqual(op.Output.priority, 1)
+
+    def testComplex(self):
+        g = graph.Graph()
+        outer1 = OpSimple(graph=g)
+        outer2 = OpSimple(graph=g)
+        outer2.Input.connect(outer1.Output)
+
+        inner1 = OpSimple(parent=outer1)
+        inner1a = OpSimple(parent=outer1)
+        inner1b = OpSimple(parent=outer1)
+        inner1.Input.connect(outer1.Input)
+        inner1.Output.connect(inner1.Input)
+        inner1b.Input.connect(inner1a.Output)
+        # inner1a.Output.connect(inner1a.Input)
+        inner1a.Input.connect(outer1.Input)
+
+        inner2 = OpSimple(parent=outer2)
+        inner2.Input.setValue(1)
+        outer2.Output.connect(inner2.Output)
+        inner2.Output.connect(inner2.Input)
+
+        assertEqual(outer1.Input.priority, 0)
+        assertEqual(outer1.Output.priority, 5)
+
+        assertEqual(inner1.Input.priority, 1)
+        assertEqual(inner1.Output.priority, 2)
+
+        assertEqual(inner1a.Input.priority, 1)
+        assertEqual(inner1a.Output.priority, 2)
+        assertEqual(inner1b.Input.priority, 3)
+        assertEqual(inner1b.Output.priority, 4)
+
+        assertEqual(outer2.Input.priority, 6)
+        assertEqual(outer2.Output.priority, 2)
+
+        outer2.Input.connect(outer1.Input)
+        assertEqual(outer2.Input.priority, 1)
+
+    def testMultiLevel(self):
+        class OpHigher(OpSimple):
+            Second = graph.InputSlot(level=1)
+
+        g = graph.Graph()
+        op1 = OpSimple(graph=g)
+        op2 = OpHigher(graph=g)
+        op2.Second.resize(2)
+        op2.Second[0].connect(op1.Input)
+        op2.Second[1].connect(op1.Output)
+
+        assertEqual(op2.Second[0].priority, 1)
+        assertEqual(op2.Second[1].priority, 2)
+
+        with self.assertRaises(RuntimeError):
+            p = op2.Second.priority
+            print(p)
 
 if __name__ == "__main__":
     import sys

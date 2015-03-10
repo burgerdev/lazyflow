@@ -1426,6 +1426,23 @@ class InputSlot(Slot):
         self._type = "input"
         # configure operator in case of slot change
         self.notifyResized(self._configureOperator)
+        self.__priority = None
+
+    @property
+    def priority(self):
+        if self.level > 0:
+            raise RuntimeError(
+                "priority can only be accessed for level 0 slots")
+        if self.__priority is None:
+            if self.partner is not None:
+                self.__priority = self.partner.priority + 1 
+            else:
+                self.__priority = 0
+        return self.__priority
+
+    def connect(self, *args, **kwargs):
+        self.__priority = None
+        super(type(self), self).connect(*args, **kwargs)
 
 
 class OutputSlot(Slot):
@@ -1443,11 +1460,11 @@ class OutputSlot(Slot):
 
     """
 
-
     def __init__(self, *args, **kwargs):
         super(OutputSlot, self).__init__(*args, **kwargs)
         self._type = "output"
         assert 'optional' not in kwargs, '"optional" init arg cannot be used with OutputSlot'
+        self.__priority = None
 
     def execute(self, slot, subindex, roi, result):
         """For now, OutputSlots with level > 0 must pretend to be
@@ -1456,3 +1473,44 @@ class OutputSlot(Slot):
         """
         totalIndex = (self._subSlots.index(slot),) + subindex
         return self.operator.execute(self, totalIndex, roi, result)
+
+    @property
+    def priority(self):
+        if self.level > 0:
+            raise RuntimeError(
+                "priority can only be accessed for level 0 slots")
+        if self.__priority is None:
+            if self.partner is not None:
+                self.__priority = self.partner.priority + 1 
+            else:
+                self.__priority = myMax(iterAncestors(self),
+                                        transform=lambda x: x.priority) + 1
+        return self.__priority
+
+    def connect(self, *args, **kwargs):
+        self.__priority = None
+        super(type(self), self).connect(*args, **kwargs)
+
+def myMax(iterator, default=0, transform=lambda x: x):
+    m = default
+    while True:
+        try:
+            item = iterator.next()
+            current = transform(item)
+            if current > m:
+                m = current
+        except StopIteration:
+            return m
+
+
+def iterAncestors(slot):
+    op = slot.getRealOperator()
+    if op is None:
+        raise StopIteration()
+
+    for s in op.inputs.values():
+        yield s
+
+    for child in op.children:
+        for s in child.outputs.values():
+            yield s
