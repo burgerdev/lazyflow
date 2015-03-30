@@ -36,10 +36,15 @@ def _drtile_old(bool_array):
 
 def _drtile_new(bool_array):
     """
-    tile the true parts of a bool arrray
+    tile the non-zero parts of a bool array into rectangles
  
-    Returns an iterable that contains rois as concatenated start and
+    Returns an iterator that contains rois as concatenated start and
     stop vectors (for a 3-dim array, roi.shape == 6).
+
+    Note: If you want to keep the tiles for more than one iteration, use
+    this function as
+
+    >>> tile_rois = list(drtile(bool_array))
     """
     x = bool_array
 
@@ -59,7 +64,7 @@ def _drtile_new(bool_array):
             for k in current)
 
         # finalize tilings that are not in the current hyperplane
-        final = ifilter(lambda k: k not in current, last_dict)
+        final = ifilter(lambda k: k not in current_dict, last_dict)
         expanded = imap(lambda k: _expand_roi(k, last_dict[k], i), final)
         rois.extend(expanded)
 
@@ -67,7 +72,7 @@ def _drtile_new(bool_array):
 
     # add the remaining tiles
     expanded = imap(lambda k: _expand_roi(k, last_dict[k], x.shape[-1]),
-                    last)
+                    last_dict)
     rois.extend(expanded)
     return rois
 

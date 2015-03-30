@@ -37,7 +37,7 @@ class TestDrtile(unittest.TestCase):
         x = [1, 1, 0, 1, 0, 0, 1, 1, 1]
         x = np.asarray(x)
 
-        rois = drtile(x)
+        rois = list(drtile(x))
         np.testing.assert_equal(len(rois), 3)
 
     def testSimple2d(self):
@@ -47,7 +47,7 @@ class TestDrtile(unittest.TestCase):
              [1, 1, 1, 1, 1]]
         x = np.asarray(x)
 
-        rois = drtile(x)
+        rois = list(drtile(x))
         np.testing.assert_equal(len(rois), 4)
 
     @unittest.expectedFailure
@@ -58,7 +58,7 @@ class TestDrtile(unittest.TestCase):
              [0, 1, 1, 1, 1]]
         x = np.asarray(x)
 
-        rois = drtile(x)
+        rois = list(drtile(x))
         np.testing.assert_equal(len(rois), 4)
 
     def test3d(self):
@@ -80,13 +80,7 @@ class TestDrtile(unittest.TestCase):
                               y[:, :, np.newaxis],
                               x[:, :, np.newaxis]), axis=2)
 
-        rois = drtile(vol)
-
-        print(vol.shape)
-        print("ARRAY")
-        print(vol)
-        print("TILING")
-        print(tilingToArray(rois, vol.shape))
+        rois = list(drtile(vol))
 
         # 2*4 in x arrays and 4 in 2*y
         np.testing.assert_equal(len(rois), 3*4)
