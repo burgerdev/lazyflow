@@ -55,15 +55,14 @@ def _drtile_new(bool_array):
         current = _drtile_new(x[..., i])
         # check which tiles are present in last hyperplane
         current_dict = dict(
-            (k, (i if k not in last else last_dict[k]))
+            (k, (i if k not in last_dict else last_dict[k]))
             for k in current)
 
         # finalize tilings that are not in the current hyperplane
-        final = ifilter(lambda k: k not in current, last)
+        final = ifilter(lambda k: k not in current, last_dict)
         expanded = imap(lambda k: _expand_roi(k, last_dict[k], i), final)
         rois.extend(expanded)
 
-        last = current
         last_dict = current_dict
 
     # add the remaining tiles
@@ -80,25 +79,24 @@ def _expand_roi(r, a, b):
     s.append(b)
     return tuple(s)
 
+
 def _drtile_1d(x):
-    rois = []
+    n = len(x)
     current = None
-    for i in range(len(x)):
+    for i in range(n):
         if current is None:
             # looking for a start
             if x[i]:
-                current = [i, None]
+                current = i
         else:
             # looking for stop
             if not x[i]:
-                current[1] = i
-                rois.append(tuple(current))
+                yield ((current, i))
                 current = None
     if current is not None:
         # we have an open region left
-        current[1] = len(x)
-        rois.append(tuple(current))
-    return rois
+        yield ((current, n))
+
 
 
 # export new style drtile

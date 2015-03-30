@@ -128,6 +128,8 @@ class BenchmarkTimer(object):
             x *= 1e3
         if rev:
             x = 1/x
+            x *= 1e3
+            e -= 3
         else:
             e = -e
         return "{:.2f}".format(x) + ("*10^{}".format(e) if e else "")
@@ -135,8 +137,8 @@ class BenchmarkTimer(object):
 if __name__ == "__main__":
     from lazyflow.drtile2.drtile import _drtile_old, _drtile_new
 
-    for n in (5, 10, 20, 30):
-        shape = (n,)*3
+    for n in (5, 10, 20, 30, 40, 50, 100, 1000):
+        shape = (n,)*2
         print("Shape {}".format(shape))
         np.random.seed(0)
         x = np.random.randint(0, 2, size=shape)
