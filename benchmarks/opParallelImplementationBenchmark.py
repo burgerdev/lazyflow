@@ -41,7 +41,7 @@ Request.reset_thread_pool(num_workers=1)
 shape = 1, 500, 1000, 120, 1
 chunkShape = 1, 500, 500, 20, 1
 num_cores = int(os.environ["NUM_PROC"])
-x = np.random.randint(0, 255, size=shape)
+x = np.random.randint(0, 255, size=shape).astype(np.float32)
 x = vigra.taggedView(x, axistags='txyzc')
 
 
