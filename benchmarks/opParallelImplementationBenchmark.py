@@ -22,13 +22,17 @@
 
 from timeit import timeit
 import os
+import sys
 
 import numpy as np
 import vigra
+import h5py
 
 from lazyflow.graph import Graph
 
 from lazyflow.operators.vigraOperators import OpGaussianSmoothing
+from lazyflow.operators.ioOperators import OpStreamingHdf5Reader
+from lazyflow.operators import OpReorderAxes
 
 from lazyflow.operators.opParallel import OpMapParallel
 from lazyflow.operators.opParallelImplementations import RequestStrategy
@@ -38,57 +42,68 @@ from lazyflow.operators.opParallelImplementations import MPIStrategy
 from lazyflow.request import Request
 Request.reset_thread_pool(num_workers=1)
 
-shape = 1, 500, 1000, 120, 1
-chunkShape = 1, 500, 500, 20, 1
+
 num_cores = int(os.environ["NUM_PROC"])
-x = np.random.randint(0, 255, size=shape).astype(np.float32)
-x = vigra.taggedView(x, axistags='txyzc')
 
-
-def benchmarkRegular():
-    Request.reset_thread_pool()
-    g = Graph()
-    op = OpGaussianSmoothing(graph=g)
-    op.Input.setValue(x)
-    op.sigma.setValue(1.0)
-    op.Output[...].wait()
-
-def benchmarkRequest():
-    Request.reset_thread_pool()
-    g = Graph()
-    op = OpMapParallel(OpGaussianSmoothing, "Output",
-                       RequestStrategy(chunkShape),
-                       graph=g)
-    op.Input.setValue(x)
-    op.sigma.setValue(1.0)
-    op.Output[...].wait()
-
-def benchmarkMultiprocessing():
-    Request.reset_thread_pool(num_workers=1)
-    g = Graph()
-    op = OpMapParallel(OpGaussianSmoothing, "Output",
-                       MultiprocessingStrategy(num_cores, chunkShape),
-                       graph=g)
-    op.Input.setValue(x)
-    op.sigma.setValue(1.0)
-    op.Output[...].wait()
-
-def benchmarkMPI():
-    # need HDF5 streaming reader!
-    Request.reset_thread_pool(num_workers=1)
-    g = Graph()
-    op = OpMapParallel(OpGaussianSmoothing, "Output",
-                       MPIStrategy(chunkShape),
-                       graph=g)
-    op.Input.setValue(x)
-    op.sigma.setValue(1.0)
-    op.Output[...].wait()
-
-from mpi4py import MPI
-my_rank = MPI.COMM_WORLD.rank
-justmpi = MPI.COMM_WORLD.size > 1
-
-if __name__ == "__main__":
+for dim_x_str in sys.argv[1:]:
+    dim_x = int(dim_x_str)
+    shape = 1, dim_x, 1000, 120, 1
+    chunkShape = 1, 500, 500, 20, 1
+    x = np.random.randint(0, 255, size=shape).astype(np.float32)
+    x = vigra.taggedView(x, axistags='txyzc')
+    
+    vigra.writeHDF5(x, '/tmp/test.h5', '/data')
+    
+    graph = Graph()
+    
+    
+    def run(op):
+        with h5py.File('/tmp/test.h5', 'r') as h5file:
+            reader = OpStreamingHdf5Reader(graph=graph)
+            reader.Hdf5File.setValue(h5file)
+            reader.InternalPath.setValue('/data')
+            order = OpReorderAxes(graph=graph)
+            order.Input.connect(reader.OutputImage)
+            order.AxisOrder.setValue('txyzc')
+            op.Input.connect(order.Output)
+            op.sigma.setValue(1.0)
+            op.Output[...].wait()
+    
+    
+    def benchmarkRegular():
+        Request.reset_thread_pool()
+        op = OpGaussianSmoothing(graph=graph)
+        run(op)
+    
+    
+    def benchmarkRequest():
+        Request.reset_thread_pool()
+        op = OpMapParallel(OpGaussianSmoothing, "Output",
+                           RequestStrategy(chunkShape),
+                           graph=graph)
+        run(op)
+    
+    
+    def benchmarkMultiprocessing():
+        Request.reset_thread_pool(num_workers=1)
+        op = OpMapParallel(OpGaussianSmoothing, "Output",
+                           MultiprocessingStrategy(num_cores, chunkShape),
+                           graph=graph)
+        run(op)
+    
+    
+    def benchmarkMPI():
+        # need HDF5 streaming reader!
+        Request.reset_thread_pool(num_workers=1)
+        op = OpMapParallel(OpGaussianSmoothing, "Output",
+                           MPIStrategy(chunkShape),
+                           graph=graph)
+        run(op)
+    
+    from mpi4py import MPI
+    my_rank = MPI.COMM_WORLD.rank
+    justmpi = MPI.COMM_WORLD.size > 1
+    
     if not justmpi:
         res = timeit("benchmarkRegular()", number=1,
                      setup="from __main__ import benchmarkRegular")
@@ -106,4 +121,4 @@ if __name__ == "__main__":
                      setup="from __main__ import benchmarkMPI")
         if my_rank == 0:
             print("MPI: {:.3f}s".format(res))
-
+    

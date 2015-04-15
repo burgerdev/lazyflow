@@ -79,7 +79,9 @@ def partitionRoiForWorkers(roi, shape, blockShape, n):
     distributed over n workers and *after that* the roi is intersected with
     the sets for each worker. This means that a ROI will always be assigned to
     the same worker, regardless of the remaining request.
-    
+
+    TODO: For large rois, it is inefficient to do this in Python.
+
     @param roi roi which shall be distributed
     @param shape shape of the entire volume
     @param blockShape shape of a single block
@@ -208,6 +210,7 @@ class MultiprocessingStrategy(ParallelStrategyABC):
         [p.start() for p in procs]
         n = np.sum([len(p) for p in workerRois])
         while n > 0:
+            # TODO handle errors in workers
             roi, res = queue.get()
             if result is not None:
                 result[roi] = res
@@ -259,7 +262,6 @@ class MPIStrategy(ParallelStrategyABC):
         origin = roi.start
         count = 0
         for roi in myRois:
-            print("{}: {}".format(me, str(roi)))
             req = slot.get(roi)
             res = req.wait()
             resroi = toResultRoi(roi, origin).toSlice()
