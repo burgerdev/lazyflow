@@ -23,73 +23,22 @@
 import psutil
 if psutil.__version__ < '0.6':
     raise RuntimeError("lazyflow requires psutil 0.6.  Please upgrade your version of psutil (e.g. easy_install -U psutil)")
-try:
-    from  lazyflow.drtile import drtile
-except Exception, e:
-    raise RuntimeError("Error importing drtile, please use cmake to compile lazyflow.drtile !\n" + str(e))
 
 #lazyflow
 import lazyflow
 from lazyflow.rtype import SubRegion
 from lazyflow.graph import Operator, InputSlot, OutputSlot
-from lazyflow.roi import sliceToRoi, roiToSlice, block_view, TinyVector, getBlockBounds
+from lazyflow.roi import sliceToRoi, roiToSlice, TinyVector, getBlockBounds
 from lazyflow import request
 from lazyflow.utility import Tracer
-
-from lazyflow.operators.arrayCacheMemoryMgr import ArrayCacheMemoryMgr
 
 #various cache operators
 from lazyflow.operators.opArrayCache import OpArrayCache
 from lazyflow.operators.opArrayPiper import OpArrayPiper
 from lazyflow.operators.opBlockedArrayCache import OpBlockedArrayCache
 from lazyflow.operators.opSlicedBlockedArrayCache import OpSlicedBlockedArrayCache
+from lazyflow.operators.opUnblockedArrayCache import OpUnblockedArrayCache
 
 # Don't import these obsolete label operators by default.
 #from lazyflow.operators.opSparseLabelArray import OpSparseLabelArray
 #from lazyflow.operators.opBlockedSparseLabelArray import OpBlockedSparseLabelArray
-
-
-# create global Memory Manager instance
-if not hasattr(ArrayCacheMemoryMgr, "instance"):
-    mgr = ArrayCacheMemoryMgr() 
-    setattr(ArrayCacheMemoryMgr, "instance" ,mgr)
-    mgr.start()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

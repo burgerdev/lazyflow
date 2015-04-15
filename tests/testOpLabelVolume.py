@@ -24,13 +24,16 @@ import numpy as np
 import vigra
 
 import unittest
+import weakref
+import gc
 
 from lazyflow.graph import Graph
-from lazyflow.operators import OpLabelVolume
+from lazyflow.operators import OpLabelVolume, OpArrayPiper
 from lazyflow.operator import Operator
 from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.utility.testing import assertEquivalentLabeling
+from lazyflow.operators.cacheMemoryManager import CacheMemoryManager
 
 from numpy.testing import assert_array_equal
 
