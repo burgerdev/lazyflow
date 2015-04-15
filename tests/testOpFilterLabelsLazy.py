@@ -68,6 +68,16 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         np.testing.assert_array_equal(out,
                                       self.vol)
 
+    def testBinaryOut(self):
+        op = self.op
+        op.MinLabelSize.setValue(0)
+        op.BinaryOut.setValue(True)
+        out = self.five(op.Output[...].wait(),
+                        tags=op.Output.meta.axistags)
+
+        np.testing.assert_array_equal(out,
+                                      (self.vol > 0).astype(np.uint32))
+
     def testMinLabelSize(self):
         op = self.op
         op.MinLabelSize.setValue(8)

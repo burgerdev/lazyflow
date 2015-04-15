@@ -37,10 +37,33 @@ from lazyflow.operator import Operator
 from lazyflow.rtype import SubRegion
 from opLazyConnectedComponents import threadsafe
 
-# This class manages parallel executions of lazy algorithms, such that
-# no region is computed more than once. You may need to subclass this
-# manager.
+
 class LazyManager(object):
+    """
+    This class manages the parallel execution of lazy algorithms, such
+    that no region is computed more than once. The manager handles work
+    packages which must implement the set() interface, or at least
+        * difference_update
+        * union
+        * intersection
+    The workflow for using the manager looks something like this
+
+        >>> mgr = LazyManager()
+        >>> mgr.hello()
+        >>> myTicket = mgr.register()
+        >>> # determine my work package for my chunk
+        >>> # myChunk = ...
+        >>> # myWork = ...
+        >>> myRemainingWork, othersToWaitFor = \
+        ... mgr.checkoutWork(myChunk, myWork, myTicket)
+        >>> # do work ...
+        >>> mgr.unregister(myTicket)
+        >>> # now wait until all other workers have finished their work
+        >>> # on this chunk
+        >>> mgr.waitFor(othersToWaitFor)
+        >>> # all work on myChunk involving myWork is done by now
+        >>> mgr.goodbye()
+    """
 
     def __init__(self):
         self._lock = Condition()
@@ -92,9 +115,9 @@ class LazyManager(object):
         others = set()
         thisChunk = self._work[chunk]
         for otherProcess, otherWork in thisChunk:
-            inters = work & otherWork
+            inters = work.intersection(otherWork)
             if len(inters) > 0:
-                work = work - inters
+                work.difference_update(inters)
                 others.add(otherProcess)
         if len(work) > 0:
             thisChunk.append((ticket, work))
@@ -102,18 +125,24 @@ class LazyManager(object):
 
     @threadsafe
     def mergeWork(self, a, b):
-        return a | b
+        return a.union(b)
 
 
 class OpLazyRegionGrowing(Operator):
+    """
+    provides a framework for making operations lazy by growing the roi
+
+    
+    """
     name = "OpLazyRegionGrowing"
 
     ########################### API ###########################
 
-    # the manager property holds a LazyManager instance
-    # feel free to provide your own subclass
     @property
     def manager(self):
+        """
+        a LazyManager instance suitable for the task
+        """
         return self.__manager
 
     @manager.setter
@@ -121,51 +150,86 @@ class OpLazyRegionGrowing(Operator):
         assert isinstance(mgr, LazyManager), "Invalid manager type"
         self.__manager = mgr
 
-    #TODO specify when lock use is appropriate
-    @property
-    def lock(self):
-        return self._lock
-
-    # TODO how to use mergeMap?
-    @property
-    def mergeMap(self):
-        return self.__mergeMap
-
     ############# Methods you *should* override #############
 
     @abstractmethod
-    #TODO document signature work=hsc(ind)
     def handleSingleChunk(self, chunkIndex):
+        """
+        process  a single chunk
+
+        This method usually applies non-lazy implementations to a single
+        chunk. Treatment of borders is done in mergeChunks(). The return
+        value must be a work package that can be handled by the manager,
+        e.g. a dict for the default LazyManager. Make sure that you use
+        locks for chunks inside this function if you need them, this
+        operator will not lock per-chunk.
+        """
         raise NotImplementedError()
 
     @abstractmethod
-    #TODO document signature w1, w2=hsc(c1, c2)
     def mergeChunks(self, chunkA, chunkB):
+        """
+        border treatment of two adjacent chunks
+
+        This method is called after handleSingleChunk was called for
+        both chunkA and chunkB, to unify the output of underlying non-
+        lazy implementations. The return value must be a 2-tuple of work
+        packages, the first one for chunkA and the second one for
+        chunkB.
+
+        This method should probably be protected by a lock for a
+        specified chunk, e.g. the lexicographically smaller one.
+        Careful: There is no fixed ordering of the arguments you
+        probably have to reorder them before use (see method orderPair).
+
+        It is *not* guaranteed that this method will be called only once
+        for a particular pair of chunks.
+        """
         raise NotImplementedError()
 
-    # this one is called in setupOutputs and must return a 5-tuple
     @abstractmethod
     def chunkShape(self):
+        """
+        a tuple with length equal to the input's dimension
+
+        Determining the chunk shape is left to child classes, so that
+        they can use a slot, meta.ideal_blockshape, ...
+        """
         raise NotImplementedError()
 
     # this one is called in setupOutputs and must return a 5-tuple
     @abstractmethod
     def shape(self):
+        """
+        a tuple with length equal to the input's dimension
+
+        Determining the shape is left to child classes, so that
+        arbitrary input slots can be supported.
+        """
         raise NotImplementedError()
 
-    # final mapping of result, after region is grown
     @abstractmethod
-    def fillResult(self):
+    def fillResult(self, roi, result):
+        """
+        final mapping of result, after region is grown
+        
+        This method must fill up the result with the data computed by
+        the region growing, probably from an internal cache.
+        """
         raise NotImplementedError()
 
     def execute(self, slot, subindex, roi, result):
         self.executeRegionGrowing(roi, result)
 
-    def propagateDirty(self, slot, subindex, roi):
-        pass
+    # The methods below belong to the operator interface, we don't want
+    # to change the default behaviour by defining them here. In child
+    # operators they should be implemented, though.
+    #
+    # def propagateDirty(self, slot, subindex, roi):
+    #     pass
 
-    def setInSlot(self, slot, subindex, key, value):
-        pass
+    # def setInSlot(self, slot, subindex, key, value):
+    #     pass
 
     ############# Methods you *can* override #############
     ############# (but please call super()!) #############
@@ -180,19 +244,28 @@ class OpLazyRegionGrowing(Operator):
     ############# Methods you can call #############
 
     def executeRegionGrowing(self, roi, result):
+        """
+        start the region growing algorithm
+        
+        Note that this operator is slot agnostic, meaning that it
+        expects requests to come for exactly one slot. This can be
+        changed by implementing execute().
+        """
         logger.debug("Growing region for {}".format(roi))
         self.__manager.hello()
         othersToWaitFor = set()
         chunks = self.roiToChunkIndex(roi)
         for chunk in chunks:
-            othersToWaitFor |= self.growRegion(chunk)
+            othersToWaitFor |= self.__growRegion(chunk)
 
         self.__manager.waitFor(othersToWaitFor)
         self.__manager.goodbye()
         self.fillResult(roi, result)
 
-    # create roi object from chunk index
     def chunkIndexToRoi(self, index):
+        """
+        create roi object from chunk index
+        """
         shape = self.__shape
         start = self.__chunkShape * np.asarray(index)
         stop = self.__chunkShape * (np.asarray(index) + 1)
@@ -201,8 +274,10 @@ class OpLazyRegionGrowing(Operator):
                         start=tuple(start), stop=tuple(stop))
         return roi
 
-    # create a list of chunk indices needed for a particular roi
     def roiToChunkIndex(self, roi):
+        """
+        create a list of chunk indices needed for a particular roi
+        """
         cs = self.__chunkShape
         start = np.asarray(roi.start)
         stop = np.asarray(roi.stop)
@@ -214,9 +289,12 @@ class OpLazyRegionGrowing(Operator):
         chunks = list(itertools.product(*iters))
         return chunks
 
-    # compute the adjacent hyperplanes of two chunks (1 pix wide)
-    # @return 2-tuple of roi's for the respective chunk
     def chunkIndexToHyperplane(self, chunkA, chunkB, width=2):
+        """
+        compute the adjacent hyperplanes of two chunks (1 pix wide)
+
+        @return 2-tuple of roi's for the respective chunk
+        """
         rev = False
         assert chunkA[0] == chunkB[0] and chunkA[4] == chunkB[4],\
             "these chunks are not spatially adjacent"
@@ -240,8 +318,10 @@ class OpLazyRegionGrowing(Operator):
         else:
             return roiA, roiB
 
-    # generate a list of adjacent chunks
     def generateNeighbours(self, chunkIndex):
+        """
+        generate a list of adjacent chunks
+        """
         n = []
         idx = np.asarray(chunkIndex, dtype=np.int)
         # only spatial neighbours are considered
@@ -256,10 +336,12 @@ class OpLazyRegionGrowing(Operator):
                 n.append(tuple(new))
         return n
 
-    # order a pair of chunk indices lexicographically
-    # (ret[0] is top-left-in-front-of of ret[1])
     @staticmethod
     def orderPair(tupA, tupB):
+        """
+        order a pair of chunk indices lexicographically
+        (ret[0] is top-left-in-front-of of ret[1])
+        """
         for a, b in zip(tupA, tupB):
             if a < b:
                 return tupA, tupB
@@ -270,10 +352,12 @@ class OpLazyRegionGrowing(Operator):
 
     ################## INTERNALS -- DO NOT USE ##################
 
-    # grow the requested region such that all chunks inside that region
-    # are final
-    # @param chunkIndex the index of the chunk to finalize
-    def growRegion(self, chunkIndex):
+    def __growRegion(self, chunkIndex):
+        """
+        grow the requested region until all chunks inside are final
+
+        @param chunkIndex the index of the chunk to finalize
+        """
         ticket = self.__manager.register()
         othersToWaitFor = set()
 
@@ -319,8 +403,10 @@ class OpLazyRegionGrowing(Operator):
         self.__manager.unregister(ticket)
         return othersToWaitFor
 
-    # fills attributes with standard values, call on each setupOutputs
     def __setDefaultInternals(self):
+        """
+        fill attributes with standard values (call on each setupOutputs)
+        """
         shape = self.shape()
         chunkShape = self.chunkShape()
         chunkShape = np.minimum(shape, chunkShape)
@@ -331,8 +417,3 @@ class OpLazyRegionGrowing(Operator):
         self.__shape = shape
         # manager object
         self.__manager = LazyManager()
-
-        ### algorithmic ###
-
-        # keep track of merged regions
-        self.__mergeMap = defaultdict(list)

@@ -34,26 +34,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 from opLazyRegionGrowing import OpLazyRegionGrowing
-from opLazyRegionGrowing import LazyManager
-from opLazyRegionGrowing import threadsafe
-
-
-class FilterManager(LazyManager):
-    def __init__(self):
-        self._work = defaultdict(list)
-
-    @threadsafe
-    def checkoutWork(self, chunk, work, ticket):
-        others = set()
-        thisChunk = self._work[chunkIndex]
-        for otherProcess, otherWork in thisChunk:
-            inters = work & otherWork
-            if len(inters) > 0:
-                work = work - inters
-                others.add(otherProcess)
-        if len(work) > 0:
-            thisChunk.append((n, work))
-        return work, others
 
 
 class OpFilterLabelsLazy(OpLazyRegionGrowing):
@@ -83,7 +63,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         return self.Input.meta.shape
 
     def chunkShape(self):
-        return self._chunkShape
+        return getattr(self, "_chunkShape", None)
 
     def setupOutputs(self):
 
@@ -97,17 +77,17 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
             chunkShape = OpLazyConnectedComponents._automaticChunkShape(
                 self._Input.meta.shape)
         self._chunkShape = chunkShape
-
         super(OpFilterLabelsLazy, self).setupOutputs()
 
         self.__labelCount = defaultdict(lambda: defaultdict(int))
         self.__chunkLocks = defaultdict(Lock)
         self.__handled = set()
+        # keep track of merged regions
+        self.__mergeMap = defaultdict(list)
 
         self.Output.meta.assignFrom(self.Input.meta)
 
         if self.BinaryOut.ready() and self.BinaryOut.value:
-            self.Output.meta.dtype = np.uint8
             self.__binary = True
         else:
             self.__binary = False
@@ -148,9 +128,9 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         reordered = a != chunkA
         
         with self.__chunkLocks[a]:
-            if b in self.mergeMap[a]:
+            if b in self.__mergeMap[a]:
                 return set()
-            self.mergeMap[chunkA].append(chunkB)
+            self.__mergeMap[chunkA].append(chunkB)
 
             hyperplane_roi_a, hyperplane_roi_b = \
                 self.chunkIndexToHyperplane(a, b)
@@ -177,6 +157,8 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
                 lc = self.__labelCount[(t, c)]
                 maxLabel = max(lc.keys())
                 mapping = np.arange(maxLabel+1)
+                if self.__binary:
+                    mapping[mapping>0] = 1
                 for label in lc:
                     n = lc[label]
                     if n > self.__maxSize or n < self.__minSize:
