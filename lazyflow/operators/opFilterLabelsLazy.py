@@ -28,6 +28,7 @@ from itertools import ifilter
 
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.operators.opFilterLabels import OpLabelFilteringABC
+from lazyflow.operators import OpReorderAxes
 from lazyflow.operators.opLazyConnectedComponents import OpLazyConnectedComponents
 
 import logging
@@ -59,6 +60,23 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
 
     Output = OutputSlot()
 
+    # internal slots
+    _Input = OutputSlot()
+    _Output = OutputSlot()
+
+    def __init__(self, *args, **kwargs):
+        super(OpFilterLabelsLazy, self).__init__(*args, **kwargs)
+
+        # reordering operators - we want to handle txyzc inside this operator
+        self._opIn = OpReorderAxes(parent=self)
+        self._opIn.AxisOrder.setValue('txyzc')
+        self._opIn.Input.connect(self.Input)
+        self._Input.connect(self._opIn.Output)
+
+        self._opOut = OpReorderAxes(parent=self)
+        self._opOut.Input.connect(self._Output)
+        self.Output.connect(self._opOut.Output)
+
     def shape(self):
         return self.Input.meta.shape
 
@@ -85,7 +103,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         # keep track of merged regions
         self.__mergeMap = defaultdict(list)
 
-        self.Output.meta.assignFrom(self.Input.meta)
+        self._Output.meta.assignFrom(self._Input.meta)
 
         if self.BinaryOut.ready() and self.BinaryOut.value:
             self.__binary = True
@@ -99,6 +117,9 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
             self.__maxSize = self.MaxLabelSize.value
         else:
             self.__maxSize = np.inf
+
+        # go back to original order
+        self._opOut.AxisOrder.setValue(self.Input.meta.getAxisKeys())
 
     def propagateDirty(self, slot, subindex, roi):
         # set everything dirty because determining what changed is as

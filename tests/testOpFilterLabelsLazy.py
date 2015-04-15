@@ -29,6 +29,8 @@ from lazyflow.operators.opFilterLabelsLazy import OpFilterLabelsLazy
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 
 from lazyflow.utility.testing import OpArrayPiperWithAccessCount
+from lazyflow.utility.testing import OpBigArraySimulator
+from lazyflow.utility.testing import Timeout
 
 
 class TestOpFilterLabelsLazy(unittest.TestCase):
@@ -156,3 +158,20 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         ref = self.five(np.zeros_like(out),
                         tags=op.Output.meta.axistags)
         np.testing.assert_array_equal(out, ref)
+
+    def testReallyBigInput(self):
+        g = Graph()
+        pipe = OpBigArraySimulator(graph=g)
+        pipe.Shape.setValue((1, 10000, 10000, 10000, 1))
+        # 1TB memory should be sufficient to test
+
+        pipe.Input.setValue(self.vol)
+
+        op = OpFilterLabelsLazy(graph=Graph())
+        op.Input.connect(pipe.Output)
+        op.MinLabelSize.setValue(5)
+        op.ChunkShape.setValue((10, 10, 10))
+        req = op.Output[:, 3:170, 9:18, 0:3, :]
+
+        timeout = Timeout(2, req.wait)
+        timeout.start()
