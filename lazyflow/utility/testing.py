@@ -21,9 +21,13 @@
 ###############################################################################
 
 import threading
+import itertools
+import multiprocessing
+import time
 
 import numpy as np
 from lazyflow.operator import Operator, InputSlot, OutputSlot
+from lazyflow.roi import roiToSlice
 
 
 # Some tools to aid automated testing
@@ -96,3 +100,84 @@ class OpArrayPiperWithAccessCount(Operator):
 
     def propagateDirty(self, slot, subindex, roi):
         self.Output.setDirty(roi)
+
+
+class OpBigArraySimulator(Operator):
+    """
+    operator that simulates a big region, useful for testing lazy ops
+
+    The operator takes an input arry, which is then repeated so that it
+    matches Shape. Note that there is no dirty propagation.
+    """
+    Input = InputSlot(allow_mask=True)
+    Shape = InputSlot()
+    Output = OutputSlot(allow_mask=True)
+
+    def __init__(self, *args, **kwargs):
+        super(OpBigArraySimulator, self).__init__(*args, **kwargs)
+
+    def setupOutputs(self):
+        self.Output.meta.assignFrom(self.Input.meta)
+        shape = self.Shape.value
+        assert len(shape) == len(self.Input.meta.shape)
+        self.Output.meta.shape = shape
+        self.Output.meta.ideal_blockshape = self.Input.meta.shape
+
+    def execute(self, slot, subindex, roi, result):
+        vol = self.Input[...].wait()
+        blockshape = np.asarray(vol.shape, dtype=np.int)
+        start = np.asarray(roi.start, dtype=np.int)
+        stop = np.asarray(roi.stop, dtype=np.int)
+        shape = stop - start
+
+        # roll the array such that it is aligned with roi.start
+        for d in range(len(start)):
+            vol = np.roll(vol, -(start[d] % blockshape[d]), axis=d)
+
+        # determine numberof blocks in each direction
+        not_fitting = np.mod(shape, blockshape) > 0
+        numblocks = shape / blockshape
+        numblocks += np.where(not_fitting, 1, 0)
+
+        ranges = [xrange(numblocks[d]) for d in range(len(numblocks))]
+        ind_it = itertools.imap(np.asarray, itertools.product(*ranges))
+        for inds in ind_it:
+            local_start = inds * blockshape
+            local_stop = np.minimum(local_start + blockshape, shape)
+            local_shape = local_stop - local_start
+            res_slice = roiToSlice(local_start, local_stop)
+            vol_slice = roiToSlice(np.zeros_like(local_shape),
+                                   local_shape)
+            result[res_slice] = vol[vol_slice]
+
+    def propagateDirty(self, slot, subindex, roi):
+        pass
+
+
+class Timeout(object):
+    class TimeoutError(Exception):
+        pass
+
+    def __init__(self, seconds, function):
+        self.__seconds = seconds
+        self.__condition = threading.Condition()
+        def wrapped():
+            function()
+            with self.__condition:
+                self.__condition.notifyAll()
+        self.__function = wrapped
+
+    def __on_timeout(self):
+        msg = "waited {:.1f}s".format(self.__seconds)
+        raise self.TimeoutError(msg)
+
+    def start(self):
+        executor = threading.Thread(target=self.__function)
+        executor.daemon = True
+        executor.start()
+        with self.__condition:
+            self.__condition.wait(self.__seconds)
+        if executor.isAlive():
+            self.__on_timeout()
+        else:
+            executor.join()

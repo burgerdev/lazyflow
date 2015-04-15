@@ -20,15 +20,19 @@
 #          http://ilastik.org/license/
 ###############################################################################
 
+import os
+
 import numpy as np
 import vigra
 import h5py
 import unittest
 
-from numpy.testing import assert_array_equal, assert_array_almost_equal
+from numpy.testing import assert_array_equal, assert_equal
 
 from lazyflow.utility.testing import assertEquivalentLabeling
 from lazyflow.utility.testing import OpArrayPiperWithAccessCount
+from lazyflow.utility.testing import OpBigArraySimulator
+from lazyflow.utility.testing import Timeout
 from lazyflow.operators.opLazyConnectedComponents\
     import OpLazyConnectedComponents as OpLazyCC
 
@@ -182,7 +186,7 @@ class TestOpLazyCC(unittest.TestCase):
                     if x == 3 and y == 3:
                         continue
                     op.Input.setDirty(slice(None))
-                    print(op._isFinal.squeeze())
+                    print(op._isFinal)
                     out = op.Output[x:x+3, y:y+3].wait()
                     print(x, y)
                     print(out.squeeze())
@@ -259,7 +263,7 @@ class TestOpLazyCC(unittest.TestCase):
         out2 = op.Output[:1, :1].wait()
         assert np.all(out2 > 0)
 
-    @unittest.skip("too costly")
+    @unittest.skipIf('TRAVIS' in os.environ, "too costly")
     def testFromDataset(self):
         shape = (500, 500, 500)
 
@@ -289,7 +293,7 @@ class TestOpLazyCC(unittest.TestCase):
         out2 = vigra.analysis.labelVolumeWithBackground(vol)
         assertEquivalentLabeling(out1.view(np.ndarray), out2.view(np.ndarray))
 
-    @unittest.skip("too costly")
+    @unittest.skipIf('TRAVIS' in os.environ, "too costly")
     def testFromDataset2(self):
         shape = (500, 500, 500)
 
@@ -331,7 +335,7 @@ class TestOpLazyCC(unittest.TestCase):
 
         op = OpLazyCC(graph=Graph())
         op.Input.setValue(vol)
-        op.ChunkShape.setValue((50, 50, 1))
+        op.ChunkShape.setValue((25, 25, 25))
 
         reqs = [op.Output[..., 0],
                 op.Output[..., 0],
@@ -421,10 +425,10 @@ class TestOpLazyCC(unittest.TestCase):
 
         out1 = op.Output[:200, ...].wait()
         blocks = op.CleanBlocks[0].wait()[0]
-        assert len(blocks) == 20
+        assert_equal(len(blocks), 20)
 
         # prepare hdf5 file
-        f = h5py.File('temp.h5', driver='core', backing_store=False)
+        f = h5py.File('temp.h5', driver='core', backing_store=False, block_size=1024**2)
 
         for block in blocks:
             req = op.OutputHdf5(start=block[0], stop=block[1])
@@ -434,15 +438,59 @@ class TestOpLazyCC(unittest.TestCase):
         # fill whole cache
         op.Output[...].wait()
 
-        f.create_dataset('TEST', shape=(1, 1000, 100, 10, 1), dtype=np.uint32)
+        f.create_dataset('TEST', shape=(1, 1000, 100, 10, 1),
+                         dtype=np.uint32, chunks=(1, 100, 10, 10, 1))
         ds = f['TEST']
-        ds[0, ..., 0] = 23
+        expected = 23*np.ones((1000, 100, 10), dtype=np.uint32)
+        ds[0, ..., 0] = expected
 
         op.InputHdf5[0:1, 0:1000, 0:100, 0:10, 0:1] = ds
         blocks = op.CleanBlocks[0].wait()[0]
-        assert len(blocks) == 100,\
-            "Got {} clean blocks (expected {}".format(len(blocks), 100)
+        assert_equal(len(blocks), 100)
+        out = op.Output[...].wait()
+        assert_array_equal(out, expected)
 
+    def testReallyBigInput(self):
+        g = Graph()
+        pipe = OpBigArraySimulator(graph=g)
+        pipe.Shape.setValue((1, 10000, 10000, 10000, 1))
+        # 1TB memory should be sufficient to test
+
+        im = np.asarray(
+            [[0, 0, 0, 0, 0, 0, 0, 0, 0],
+             [0, 1, 1, 1, 0, 1, 1, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 1, 1, 1, 1, 1, 1, 0],
+             [0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
+
+        im = im[..., np.newaxis]
+        im2 = im*0
+        cc = (im, im, im2)
+        vol = np.concatenate(cc, axis=2)
+        assert_array_equal(vol.shape, (9, 9, 3))
+        vol = vigra.taggedView(vol, axistags='xyz')
+        vol = vol.withAxes(*'txyzc')
+
+        pipe.Input.setValue(vol)
+
+        # test if value provider works correctly
+        out = pipe.Output[:, 3:17, 9:18, 0:3, :].wait()
+        out_cut = out[:, 0:6, ...].squeeze()
+        expected = vol.view(np.ndarray)[:, 3:9, ...].squeeze()
+        assert_array_equal(out_cut, expected)
+
+        op = OpLazyCC(graph=Graph())
+        op.Input.connect(pipe.Output)
+        op.ChunkShape.setValue((9, 9, 8))
+        req = op.CachedOutput[:, 3:170, 9:18, 0:3, :]
+
+        # test took approximately one second on an Intel Atom ...
+        timeout = Timeout(2, req.wait)
+        timeout.start()
 
 class DirtyAssert(Operator):
     Input = InputSlot()

@@ -664,10 +664,12 @@ class OpLazyConnectedComponents(Operator, ObservableCache):
 
         ### global indices ###
         # offset (global labels - local labels) per chunk
-        self._globalLabelOffset = np.ones(self._chunkArrayShape,
-                                          dtype=_LABEL_TYPE)
+        # self._globalLabelOffset = np.ones(self._chunkArrayShape,
+        #                                   dtype=_LABEL_TYPE)
+        self._globalLabelOffset = defaultdict(partial(_LABEL_TYPE, 1))
         # keep track of number of indices in chunk (-1 == not labeled yet)
-        self._numIndices = -np.ones(self._chunkArrayShape, dtype=np.int32)
+        # self._numIndices = -np.ones(self._chunkArrayShape, dtype=np.int32)
+        self._numIndices = defaultdict(partial(np.int32, -1))
 
         # union find data structure, tells us for every global index to which
         # label it belongs
@@ -678,7 +680,8 @@ class OpLazyConnectedComponents(Operator, ObservableCache):
         gen = partial(InfiniteLabelIterator, 1, dtype=_LABEL_TYPE)
         self._labelIterators = defaultdict(gen)
         self._globalToFinal = defaultdict(dict)
-        self._isFinal = np.zeros(self._chunkArrayShape, dtype=np.bool)
+        # self._isFinal = np.zeros(self._chunkArrayShape, dtype=np.bool)
+        self._isFinal = defaultdict(lambda: False)
 
         ### algorithmic ###
 
@@ -690,13 +693,16 @@ class OpLazyConnectedComponents(Operator, ObservableCache):
 
     def _executeCleanBlocks(self, destination):
         assert destination.shape == (1,)
-        finalIndices = np.where(self._isFinal)
+        # finalIndices = np.where(self._isFinal)
+        finalIndices = filter(lambda x: self._isFinal[x],
+                              self._isFinal.keys())
 
         def ind2tup(ind):
             roi = self._chunkIndexToRoi(ind)
             return (roi.start, roi.stop)
 
-        destination[0] = list(map(ind2tup, zip(*finalIndices)))
+        # destination[0] = list(map(ind2tup, zip(*finalIndices)))
+        destination[0] = list(map(ind2tup, finalIndices))
 
     def _executeOutputHdf5(self, roi, destination):
         logger.debug("Servicing request for hdf5 block {}".format(roi))
@@ -738,8 +744,12 @@ class OpLazyConnectedComponents(Operator, ObservableCache):
     # print a summary of blocks in use and their storage volume
     def _report(self):
         m = {np.uint8: 1, np.uint16: 2, np.uint32: 4, np.uint64: 8}
-        nStoredChunks = self._isFinal.sum()
-        nChunks = self._isFinal.size
+        # nStoredChunks = self._isFinal.sum()
+        finalchunks = filter(lambda k: self._isFinal[k],
+                             self._isFinal.keys())
+        nStoredChunks = reduce(lambda x, y: x + 1, finalchunks, 0)
+        # nChunks = self._isFinal.size
+        nChunks = len(self._isFinal.keys())
         cachedMB = self._cache.data_bytes/1024.0**2
         rawMB = self._cache.size * m[_LABEL_TYPE]
         logger.debug("Currently stored chunks: {}/{} ({:.1f} MB)".format(
