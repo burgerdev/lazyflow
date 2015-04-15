@@ -22,8 +22,10 @@ plot.plot(x,r)
 plot.plot(x,p)
 a = x[0]
 t = np.arange(1, 5)
-plot.plot(t*a, t, 'k')
+plot.plot(t*a, t, 'k--')
 
 plot.legend(("single thread", "requests", "multiprocess"), "upper left")
 plot.xlabel("Data [MiB]")
 plot.ylabel("Runtime [s]")
+
+plot.show()

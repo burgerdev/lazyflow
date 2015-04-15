@@ -21,6 +21,7 @@
 ###############################################################################
 
 from timeit import timeit
+import os
 
 import numpy as np
 import vigra
@@ -39,7 +40,7 @@ Request.reset_thread_pool(num_workers=1)
 
 shape = 1, 500, 1000, 120, 1
 chunkShape = 1, 500, 500, 20, 1
-n = 6
+num_cores = int(os.environ["NUM_PROC"])
 x = np.random.randint(0, 255, size=shape)
 x = vigra.taggedView(x, axistags='txyzc')
 
@@ -66,7 +67,7 @@ def benchmarkMultiprocessing():
     Request.reset_thread_pool(num_workers=1)
     g = Graph()
     op = OpMapParallel(OpGaussianSmoothing, "Output",
-                       MultiprocessingStrategy(n, chunkShape),
+                       MultiprocessingStrategy(num_cores, chunkShape),
                        graph=g)
     op.Input.setValue(x)
     op.sigma.setValue(1.0)
@@ -83,8 +84,9 @@ def benchmarkMPI():
     op.sigma.setValue(1.0)
     op.Output[...].wait()
 
-
-justmpi = True
+from mpi4py import MPI
+my_rank = MPI.COMM_WORLD.rank
+justmpi = MPI.COMM_WORLD.size > 1
 
 if __name__ == "__main__":
     if not justmpi:
@@ -102,8 +104,6 @@ if __name__ == "__main__":
     else:
         res = timeit("benchmarkMPI()", number=1,
                      setup="from __main__ import benchmarkMPI")
-        from mpi4py import MPI
-        r = MPI.COMM_WORLD.rank
-        if r == 0:
+        if my_rank == 0:
             print("MPI: {:.3f}s".format(res))
 
