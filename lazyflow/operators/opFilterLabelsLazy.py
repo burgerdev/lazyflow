@@ -124,6 +124,9 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
     def propagateDirty(self, slot, subindex, roi):
         # set everything dirty because determining what changed is as
         # expensive as recomputing
+        # TODO make t, c slices independent.
+        # call super to reset the internals
+        super(OpFilterLabelsLazy, self).setupOutputs()
         self.Output.setDirty(slice(None))
 
     def handleSingleChunk(self, chunk):
@@ -150,7 +153,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         
         with self.__chunkLocks[a]:
             if b in self.__mergeMap[a]:
-                return set()
+                return set(), set()
             self.__mergeMap[chunkA].append(chunkB)
 
             hyperplane_roi_a, hyperplane_roi_b = \
@@ -162,12 +165,12 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
             hyperplane_b = self.Input.get(hyperplane_roi_b).wait()
             inds = hyperplane_a == hyperplane_b
 
+            workA = set(hyperplane_a[inds]) - set([0])
+            workB = set(hyperplane_b[inds]) - set([0])
             if reordered:
-                work = set(hyperplane_a[inds]) - set([0])
+                return workB, workA
             else:
-                work = set(hyperplane_b[inds]) - set([0])
-            return work
-            
+                return workA, workB
 
     def fillResult(self, roi, result):
         req = self.Input.get(roi)

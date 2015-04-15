@@ -29,13 +29,26 @@ import vigra
 from threading import Lock, Condition
 from collections import defaultdict
 import itertools
+import functools
 
 import logging
 logger = logging.getLogger(__name__)
 
 from lazyflow.operator import Operator
 from lazyflow.rtype import SubRegion
-from opLazyConnectedComponents import threadsafe
+
+
+def threadsafe(method):
+    """
+    decorator locking a method for the whole program
+
+    Needs the property self._lock to expose the Lock interface.
+    """
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class LazyManager(object):
@@ -46,6 +59,7 @@ class LazyManager(object):
         * difference_update
         * union
         * intersection
+        * len
     The workflow for using the manager looks something like this
 
         >>> mgr = LazyManager()
@@ -382,7 +396,7 @@ class OpLazyRegionGrowing(Operator):
             otherChunks = self.generateNeighbours(currentChunk)
             for other in otherChunks:
                 self.handleSingleChunk(other)
-                otherWork = self.mergeChunks(currentChunk, other)
+                _, otherWork = self.mergeChunks(currentChunk, other)
 
                 # add the neighbour to our processing queue only if it actually
                 # shares objects
@@ -409,6 +423,7 @@ class OpLazyRegionGrowing(Operator):
         """
         shape = self.shape()
         chunkShape = self.chunkShape()
+        assert len(shape) == len(chunkShape)
         chunkShape = np.minimum(shape, chunkShape)
         f = lambda i: shape[i]//chunkShape[i]\
             + (1 if shape[i] % chunkShape[i] else 0)
