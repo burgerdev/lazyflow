@@ -28,23 +28,7 @@ from lazyflow.graph import Graph
 from lazyflow.operators.opFilterLabelsLazy import OpFilterLabelsLazy
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 
-
-class OpExecuteCounter(Operator):
-    Input = InputSlot()
-    Output = OutputSlot()
-
-    def setupOutputs(self):
-        self.count = 0
-        self.Output.meta.assignFrom(self.Input.meta)
-
-    def execute(self, slot, subindex, roi, result):
-        self.count += 1
-        req = self.Input.get(roi)
-        req.writeInto(result)
-        req.block()
-
-    def propagateDirty(self, slot, subindex, roi):
-        self.Output.setDirty(roi)
+from lazyflow.utility.testing import OpArrayPiperWithAccessCount
 
 
 class TestOpFilterLabelsLazy(unittest.TestCase):
@@ -63,7 +47,7 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         self.vol = self.five(vol)
 
         g = Graph()
-        op = OpExecuteCounter(graph=g)
+        op = OpArrayPiperWithAccessCount(graph=g)
         op.Input.setValue(self.vol)
         self.counter = op
         op = OpFilterLabelsLazy(graph=g)
@@ -136,7 +120,7 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         # 4 chunks have to be visited
         # -> 4 for single chunk handling, 3*2 for hyperplanes
         #    1 for result
-        np.testing.assert_equal(self.counter.count, 11)
+        np.testing.assert_equal(self.counter.accessCount, 11)
 
     def testMultiDim(self):
         vol = self.vol.withAxes(*'xyz')

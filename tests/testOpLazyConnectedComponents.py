@@ -28,6 +28,7 @@ import unittest
 from numpy.testing import assert_array_equal, assert_array_almost_equal
 
 from lazyflow.utility.testing import assertEquivalentLabeling
+from lazyflow.utility.testing import OpArrayPiperWithAccessCount
 from lazyflow.operators.opLazyConnectedComponents\
     import OpLazyConnectedComponents as OpLazyCC
 
@@ -37,26 +38,6 @@ from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 
 from lazyflow.operators import OpArrayPiper, OpCompressedCache
-
-
-class DirtyAssert(Operator):
-    Input = InputSlot()
-
-    def willBeDirty(self, t, c):
-        self._t = t
-        self._c = c
-
-    def propagateDirty(self, slot, subindex, roi):
-        t_ind = self.Input.meta.axistags.index('t')
-        c_ind = self.Input.meta.axistags.index('c')
-        assert roi.start[t_ind] == self._t
-        assert roi.start[c_ind] == self._c
-        assert roi.stop[t_ind] == self._t+1
-        assert roi.stop[c_ind] == self._c+1
-        raise self.PropagateDirtyCalled()
-
-    class PropagateDirtyCalled(Exception):
-        pass
 
 
 class TestOpLazyCC(unittest.TestCase):
@@ -117,7 +98,7 @@ class TestOpLazyCC(unittest.TestCase):
         vol = vigra.taggedView(vol, axistags='xy').withAxes(*'xyz')
         chunkShape = (3, 3, 1)
 
-        opCount = OpExecuteCounter(graph=g)
+        opCount = OpArrayPiperWithAccessCount(graph=g)
         opCount.Input.setValue(vol)
 
         opCache = OpCompressedCache(graph=g)
@@ -130,8 +111,8 @@ class TestOpLazyCC(unittest.TestCase):
 
         out = op.Output[:3, :3].wait()
         n = 3
-        assert opCount.numCalls <= n,\
-            "Executed {} times (allowed: {})".format(opCount.numCalls,
+        assert opCount.accessCount <= n,\
+            "Executed {} times (allowed: {})".format(opCount.accessCount,
                                                      n)
 
     def testContiguousLabels(self):
@@ -461,17 +442,6 @@ class TestOpLazyCC(unittest.TestCase):
         blocks = op.CleanBlocks[0].wait()[0]
         assert len(blocks) == 100,\
             "Got {} clean blocks (expected {}".format(len(blocks), 100)
-
-
-class OpExecuteCounter(OpArrayPiper):
-
-    def __init__(self, *args, **kwargs):
-        self.numCalls = 0
-        super(OpExecuteCounter, self).__init__(*args, **kwargs)
-
-    def execute(self, slot, subindex, roi, result):
-        self.numCalls += 1
-        super(OpExecuteCounter, self).execute(slot, subindex, roi, result)
 
 
 class DirtyAssert(Operator):
