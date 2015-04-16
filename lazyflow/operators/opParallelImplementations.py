@@ -34,6 +34,7 @@ from functools import partial
 def partitionRoi(roi, blockShape):
     '''
     straightforward partitioning function
+
     @input roi the ROI which shall be partitioned
     @param blockShape the shape of a single partition
     @return list of SubRegion objects corresponding to partitions
@@ -51,6 +52,8 @@ def partitionRoi(roi, blockShape):
 
 def mortonOrderIterator(shape):
     '''
+    iterate over the indices of an array in Morton order (Z-order)
+
     @param shape the array shape over which to iterate
     @return iterator over single point indices in Morton order (Z-order)
     '''
@@ -137,7 +140,9 @@ def toResultRoi(roi, origin):
 
 class RequestStrategy(ParallelStrategyABC):
     """
-    TODO doc
+    This is an example parallelization strategy that uses the lazyflow
+    Request system in the usual way. 
+
     FIXME not working for Opaque output slots that return a value
           (but do those exist, anyway?)
     """
@@ -177,7 +182,12 @@ def parmap(f, X):
 
 class MultiprocessingStrategy(ParallelStrategyABC):
     """
-    TODO doc
+    This parallelization strategy uses the multiprocessing module. The
+    number of workers in __init__ should match the number of available
+    cores. Note that this operator is for demonstration purposes - using
+    plain Requests is better on a single machine. We just show how to
+    use message passing to communicate Request results.
+
     FIXME not working for Opaque output slots that return a value
           (but do those exist, anyway?)
     """
@@ -229,7 +239,11 @@ else:
 
 class MPIStrategy(ParallelStrategyABC):
     """
-    TODO doc
+    This parallelization strategy uses MPI. For optimal load, run with
+    one extra MPI process that serves as a dedicated message server.
+    E.g., on a 4 core machine, run with 
+        mpirun -np 5 python <file>
+
     FIXME not working for Opaque output slots that return a value
           (but do those exist, anyway?)
     """
@@ -270,9 +284,9 @@ class MPIStrategy(ParallelStrategyABC):
             count += 1
 
     def _receive(self, result, n):
-        '''
+        """
         only the root process is receiving data
-        '''
+        """
         comm = MPI.COMM_WORLD
         assert comm.rank == 0
         while n > 0:
@@ -282,3 +296,48 @@ class MPIStrategy(ParallelStrategyABC):
             if result is not None:
                 result[sl] = block
             n -= 1
+
+
+if __name__ == "__main__":
+    """
+    visualize Morton ordering
+    """
+    from lazyflow.graph import Graph
+    from lazyflow.operator import Operator, InputSlot, OutputSlot
+    from mpi4py import MPI
+    from opParallel import OpMapParallel
+    import vigra
+
+    def getColor(i):
+        ntiles = 8.0
+        rank = MPI.COMM_WORLD.rank
+        c = np.zeros((1, 1, 3), dtype=np.uint8)
+        if rank < 4:
+            c[..., rank-1] = int(255*i/ntiles)
+        else:
+            c[:] = int(255*i/ntiles)
+        return c
+
+    class OpMPITag(Operator):
+        Output = OutputSlot()
+
+        def setupOutputs(self):
+            self.Output.meta.shape = 400, 200, 3
+            self.Output.meta.dtype = np.uint8
+            self.i = 0
+
+        def execute(self, slot, subindex, roi, result):
+            self.i += 1
+            result[:] = getColor(self.i)
+
+        def propagateDirty(self, slot, subindex, roi, result):
+            self.Output.setDirty(roi)
+
+    graph = Graph()
+    op = OpMapParallel(OpMPITag, "Output",
+                       MPIStrategy((50, 50, 3)),
+                       graph=graph)
+
+    x = op.Output[...].wait()
+    if MPI.COMM_WORLD.rank == 0:
+        vigra.impex.writeImage(x, "/tmp/morton.png")

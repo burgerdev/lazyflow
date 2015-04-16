@@ -27,14 +27,19 @@ from lazyflow.operator import Operator
 
 class ParallelStrategyABC(object):
     """
-    TODO doc
+    The abstract base class that parallelization strategies have to
+    implement.
     """
     __metaclass__ = ABCMeta
 
     @abstractmethod
     def map(self, slot, roi, result):
         """
-        TODO doc
+        execute a request to slot in parallel
+
+        The strategy has to split the roi into sub-rois for workers,
+        execute the requests on the workers and then gather the results
+        and write it to result.
         """
         raise NotImplementedError
 
@@ -43,7 +48,10 @@ class OpMapParallel(Operator):
     '''
     Decorator for parallelizing regular operators.
 
-    TODO doc
+    This is the general parallelizing class. It takes a normal operator
+    and a slot, which are wrapped, and a parallelization strategy that
+    is executed on every call to the parallelized slot.
+
     FIXME currently only one OutputSlot supported
     FIXME opaque output is ignored
     FIXME no constructor args supported
