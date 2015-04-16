@@ -41,20 +41,21 @@ from lazyflow.operators.opParallelImplementations import RequestStrategy
 from lazyflow.operators.opParallelImplementations import MultiprocessingStrategy
 from lazyflow.operators.opParallelImplementations import MPIStrategy
 
+from lazyflow.tools.schematic import generateSvgFileForOperator
+
 from lazyflow.request import Request
 Request.reset_thread_pool(num_workers=1)
 
 
-class SmoothingWorkflow(Operator):
-    Input = InputSlot()
-    sigma = InputSlot(value=1.0)
-    Output = OutputSlot(stype=Opaque)
+class DataSink(Operator):
+    """
+    this operator emulates an HDF5 writer, or any kind of data sink
 
-    def __init__(self, *args, **kwargs):
-        super(SmoothingWorkflow, self).__init__(*args, **kwargs)
-        self.op = OpGaussianSmoothing(parent=self)
-        self.op.Input.connect(self.Input)
-        self.op.sigma.connect(self.sigma)
+    The output slot is opaque such that no memory is allocated for
+    requests on it.
+    """
+    Input = InputSlot()
+    Output = OutputSlot(stype=Opaque)
 
     def setupOutputs(self):
         self.Output.meta.assignFrom(self.op.Output.meta)
@@ -67,10 +68,36 @@ class SmoothingWorkflow(Operator):
         self.Output.setDirty(roi)
 
 
+class SmoothingWorkflow(Operator):
+    """
+    wrapper for OpGaussianSmoothing including a data sink
+    """
+    Input = InputSlot()
+    sigma = InputSlot(value=1.0)
+    Output = OutputSlot(stype=Opaque)
+
+    def __init__(self, *args, **kwargs):
+        super(SmoothingWorkflow, self).__init__(*args, **kwargs)
+        self.op = OpGaussianSmoothing(parent=self)
+        self.op.Input.connect(self.Input)
+        self.op.sigma.connect(self.sigma)
+        self.sink = DataSink(parent=self)
+        self.sink.Input.connect(self.op.Output)
+        self.Output.connect(self.sink.Output)
+
+    def setupOutputs(self):
+        pass
+
+    def execute(self, slot, subindex, roi, result):
+        pass
+
+    def propagateDirty(self, slot, subindex, roi, result):
+        pass
+
+
 num_cores = int(os.environ["NUM_PROC"])
 
-for dim_x_str in sys.argv[1:]:
-    dim_x = int(dim_x_str)
+for dim_x in (500, 1000, 1500, 2000):
     shape = 1, dim_x, 1000, 120, 1
     chunkShape = 1, 500, 500, 20, 1
 
@@ -78,16 +105,22 @@ for dim_x_str in sys.argv[1:]:
 
     def run(op):
         with h5py.File('/tmp/test_{}.h5'.format(dim_x), 'r') as h5file:
-            reader = OpStreamingHdf5Reader(graph=graph)
+            workflow = DataSink(graph=graph)
+            workflow.name = "ParallelWorkflow"
+            reader = OpStreamingHdf5Reader(parent=workflow)
             reader.Hdf5File.setValue(h5file)
             reader.InternalPath.setValue('/data')
 
-            order = OpReorderAxes(graph=graph)
+            order = OpReorderAxes(parent=workflow)
             order.Input.connect(reader.OutputImage)
             order.AxisOrder.setValue('txyzc')
 
+            op = OpMapParallel(SmoothingWorkflow, "Output",
+                               RequestStrategy(chunkShape),
+                               parent=workflow)
             op.Input.connect(order.Output)
             op.sigma.setValue(1.0)
+            # generateSvgFileForOperator("/tmp/op.svg", workflow, 5)
             op.Output[...].wait()
 
     def benchmarkRegular():
@@ -110,7 +143,6 @@ for dim_x_str in sys.argv[1:]:
         run(op)
 
     def benchmarkMPI():
-        # need HDF5 streaming reader!
         Request.reset_thread_pool(num_workers=1)
         op = OpMapParallel(SmoothingWorkflow, "Output",
                            MPIStrategy(chunkShape),
