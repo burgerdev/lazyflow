@@ -27,11 +27,15 @@ import unittest
 from lazyflow.graph import Graph
 from lazyflow.operators.opFilterLabelsLazy import OpFilterLabelsLazy
 from lazyflow.operator import Operator, InputSlot, OutputSlot
+from lazyflow.roi import roiFromShape
+from lazyflow.rtype import SubRegion
 
 from lazyflow.utility.testing import OpArrayPiperWithAccessCount
 from lazyflow.utility.testing import OpBigArraySimulator
 from lazyflow.utility.testing import Timeout
 
+from testOpLazyConnectedComponents import DirtyAssert
+from testOpLazyConnectedComponents import PropagateDirtyCalled
 
 class TestOpFilterLabelsLazy(unittest.TestCase):
     def setUp(self):
@@ -49,6 +53,7 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         self.vol = self.five(vol)
 
         g = Graph()
+        self.g = g
         op = OpArrayPiperWithAccessCount(graph=g)
         op.Input.setValue(self.vol)
         self.counter = op
@@ -171,7 +176,42 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         op.Input.connect(pipe.Output)
         op.MinLabelSize.setValue(5)
         op.ChunkShape.setValue((10, 10, 10))
-        req = op.Output[:, 3:170, 9:18, 0:3, :]
+        req = op.Output[:, 3:17, 9:18, 0:3, :]
 
         timeout = Timeout(2, req.wait)
         timeout.start()
+
+    def testDirtyPropagation(self):
+        vol = np.zeros((2, 20, 20, 20, 1), dtype=np.uint32)
+        vol[0, 0, 0, 0, 0] = 1
+        vol = vigra.taggedView(vol, axistags='txyzc')
+        op = self.op
+        op.Input.disconnect()
+        op.Input.setValue(vol)
+        op.MinLabelSize.setValue(3)
+
+        op.Output[...].wait()
+
+        dirty = DirtyAssert(graph=self.g)
+        dirty.Input.connect(op.Output)
+        dirty.start = (0, 0, 0, 0, 0)
+        dirty.stop = (1,) + vol.shape[1:4] + (1,)
+
+        roi = SubRegion(op.Input,
+                        start=(0, 0, 0, 0, 0),
+                        stop=(1, 5, 6, 7, 1))
+        with self.assertRaises(PropagateDirtyCalled):
+            op.Input.setDirty(roi)
+
+        vol[0, 0:2, 0:2, 0, 0] = 1
+        out = op.Output[0, 0:2, 0:2, 0, 0].wait()
+        assert np.all(out > 0)
+
+
+        dirty.start = (0, 0, 0, 0, 0)
+        dirty.stop = vol.shape
+        with self.assertRaises(PropagateDirtyCalled):
+            op.ChunkShape.setValue((3, 4, 5))
+        with self.assertRaises(PropagateDirtyCalled):
+            op.MinLabelSize.setValue(17)
+

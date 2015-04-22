@@ -40,6 +40,7 @@ from lazyflow.graph import Graph
 from lazyflow.operator import Operator
 from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
+from lazyflow.roi import is_fully_contained
 
 from lazyflow.operators import OpArrayPiper, OpCompressedCache
 
@@ -215,11 +216,10 @@ class TestOpLazyCC(unittest.TestCase):
 
     def testSetDirty(self):
         g = Graph()
-        vol = np.zeros((200, 100, 10))
+        vol = np.zeros((200, 100, 10, 2))
         vol = vol.astype(np.uint8)
-        vol = vigra.taggedView(vol, axistags='xyz')
+        vol = vigra.taggedView(vol, axistags='xyzt')
         vol[:200, ...] = 1
-        vol[800:, ...] = 1
 
         op = OpLazyCC(graph=g)
         op.ChunkShape.setValue((100, 20, 5))
@@ -228,11 +228,13 @@ class TestOpLazyCC(unittest.TestCase):
         opCheck = DirtyAssert(graph=g)
         opCheck.Input.connect(op.Output)
 
-        out = op.Output[:100, :20, :5].wait()
+        out = op.Output[:100, :20, :5, :].wait()
 
         roi = SubRegion(op.Input,
-                        start=(0, 0, 0),
-                        stop=(200, 100, 10))
+                        start=(0, 0, 0, 0),
+                        stop=(15, 16, 17, 1))
+        opCheck.start = (0, 0, 0, 0)
+        opCheck.stop = (200, 100, 10, 1)
         with self.assertRaises(PropagateDirtyCalled):
             op.Input.setDirty(roi)
 
@@ -451,12 +453,17 @@ class TestOpLazyCC(unittest.TestCase):
         out = op.Output[...].wait()
         assert_array_equal(out, expected)
 
-    @unittest.expectedFailure
     def testReallyBigInput(self):
+        shape = (1, 10000, 10000, 10000, 1)
+        chunk_shape = (90, 90, 12)
+        # assumptions
+        #   * 1TB does not fit in memory
+        #   * several chunks of 1MB + management structures for 10M
+        #     chunks fit in memory
+
         g = Graph()
         pipe = OpBigArraySimulator(graph=g)
-        pipe.Shape.setValue((1, 10000, 10000, 10000, 1))
-        # 1TB memory should be sufficient to test
+        pipe.Shape.setValue(shape)
 
         im = np.asarray(
             [[0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -471,35 +478,53 @@ class TestOpLazyCC(unittest.TestCase):
 
         im = im[..., np.newaxis]
         im2 = im*0
-        cc = (im, im, im2)
+        cc = (im2, im, im, im2)
         vol = np.concatenate(cc, axis=2)
-        assert_array_equal(vol.shape, (9, 9, 3))
+        assert_array_equal(vol.shape, (9, 9, 4))
         vol = vigra.taggedView(vol, axistags='xyz')
         vol = vol.withAxes(*'txyzc')
 
         pipe.Input.setValue(vol)
 
         # test if value provider works correctly
-        out = pipe.Output[:, 3:17, 9:18, 0:3, :].wait()
+        out = pipe.Output[:, 3:17, 9:18, 0:4, :].wait()
         out_cut = out[:, 0:6, ...].squeeze()
         expected = vol.view(np.ndarray)[:, 3:9, ...].squeeze()
         assert_array_equal(out_cut, expected)
 
-        op = OpLazyCC(graph=Graph())
-        op.Input.connect(pipe.Output)
-        op.ChunkShape.setValue((9, 9, 8))
-        req = op.CachedOutput[:, 3:170, 9:18, 0:3, :]
+        class MyOpArrayPiper(OpArrayPiperWithAccessCount):
+            def execute(self, slot, subindex, roi, result):
+                super(MyOpArrayPiper, self).execute(
+                    slot, subindex, roi, result)
+                with self._lock:
+                    if not hasattr(self, "rois"):
+                        self.rois = []
+                    self.rois.append(roi)
+
+        count = MyOpArrayPiper(graph=g)
+        count.Input.connect(pipe.Output)
+
+        op = OpLazyCC(graph=g)
+        op.Input.connect(count.Output)
+        op.ChunkShape.setValue(chunk_shape)
+        req = op.CachedOutput[:, 3:17, 9:18, 0:3, :]
 
         # test took approximately one second on an Intel Atom ...
         timeout = Timeout(2, req.wait)
         timeout.start()
+        for roi in count.rois:
+            assert is_fully_contained((roi.start, roi.stop),
+                                      ((0,)*5, (1, 180, 180, 24, 1))),\
+                str(roi)
+        assert count.accessCount <= 4
+
 
 class DirtyAssert(Operator):
     Input = InputSlot()
 
     def propagateDirty(self, slot, subindex, roi):
-        assert np.all(roi.start == 0)
-        assert np.all(roi.stop == self.Input.meta.shape)
+        assert_array_equal(roi.start, self.start)
+        assert_array_equal(roi.stop, self.stop)
         raise PropagateDirtyCalled()
 
 
