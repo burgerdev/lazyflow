@@ -29,7 +29,8 @@ from itertools import ifilter
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.operators.opFilterLabels import OpLabelFilteringABC
 from lazyflow.operators import OpReorderAxes
-from lazyflow.operators.opLazyConnectedComponents import OpLazyConnectedComponents
+from lazyflow.rtype import SubRegion
+from lazyflow.roi import determine_optimal_request_blockshape
 
 import logging
 logger = logging.getLogger(__name__)
@@ -67,11 +68,14 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
     def __init__(self, *args, **kwargs):
         super(OpFilterLabelsLazy, self).__init__(*args, **kwargs)
 
+        self.__allocateManagementDicts()
+
         # reordering operators - we want to handle txyzc inside this operator
         self._opIn = OpReorderAxes(parent=self)
         self._opIn.AxisOrder.setValue('txyzc')
         self._opIn.Input.connect(self.Input)
         self._Input.connect(self._opIn.Output)
+        self._Input.notifyDirty(self.__propagateDirty)
 
         self._opOut = OpReorderAxes(parent=self)
         self._opOut.Input.connect(self._Output)
@@ -85,23 +89,15 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
 
     def setupOutputs(self):
 
+        self.__allocateManagementDicts()
+
         # determine chunk shape first, because the parent class needs it
         if self.ChunkShape.ready():
             chunkShape = (1,) + self.ChunkShape.value + (1,)
-        elif self._Input.meta.ideal_blockshape is not None and\
-                np.prod(self._Input.meta.ideal_blockshape) > 0:
-            chunkShape = self._Input.meta.ideal_blockshape
         else:
-            chunkShape = OpLazyConnectedComponents._automaticChunkShape(
-                self._Input.meta.shape)
+            chunkShape = self._automaticChunkShape()
         self._chunkShape = chunkShape
         super(OpFilterLabelsLazy, self).setupOutputs()
-
-        self.__labelCount = defaultdict(lambda: defaultdict(int))
-        self.__chunkLocks = defaultdict(Lock)
-        self.__handled = set()
-        # keep track of merged regions
-        self.__mergeMap = defaultdict(list)
 
         self._Output.meta.assignFrom(self._Input.meta)
 
@@ -122,18 +118,65 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         self._opOut.AxisOrder.setValue(self.Input.meta.getAxisKeys())
 
     def propagateDirty(self, slot, subindex, roi):
-        # set everything dirty because determining what changed is as
-        # expensive as recomputing
-        # TODO make t, c slices independent.
-        # call super to reset the internals
-        super(OpFilterLabelsLazy, self).setupOutputs()
-        self.Output.setDirty(slice(None))
+        if slot is self.Input:
+            # dirty handling is done via callback from _Input
+            pass
+        else:
+            # all output is invalidated
+            self.__allocateManagementDicts()
+            self._Output.setDirty(slice(None))
+
+    def __propagateDirty(self, slot, roi):
+        """
+        catch propagateDirty at reordered input
+        """
+        start = np.asarray(roi.start, dtype=int)
+        stop = np.asarray(roi.stop, dtype=int)
+
+        # clear management structures first
+        def inside(key, t_ind, c_ind):
+            b = key[t_ind] >= start[0]
+            b = b and key[t_ind] < stop[0]
+            b = b and key[c_ind] >= start[4]
+            b = b and key[c_ind] < stop[4]
+            return b
+
+        for d, t_ind, c_ind in self.__managementDicts:
+            keys = d.keys()
+            relevant = filter(lambda k: inside(k, t_ind, c_ind),
+                              keys)
+            for key in relevant:
+                try:
+                    del d[key]
+                except KeyError:
+                    # probably cleaned up already
+                    pass
+
+        start[1:4] = 0
+        stop[1:4] = slot.meta.shape[1:4]
+        roi = SubRegion(self._Output,
+                        start=tuple(start), stop=tuple(stop))
+        self._Output.setDirty(roi)
+
+    def __allocateManagementDicts(self):
+        # keep track of management dicts
+        self.__managementDicts = []
+
+        self.__labelCount = defaultdict(lambda: defaultdict(int))
+        self.__managementDicts.append((self.__labelCount, 0, 1))
+        self.__chunkLocks = defaultdict(Lock)
+        self.__managementDicts.append((self.__chunkLocks, 0, 4))
+        self.__handled = defaultdict(bool)
+        self.__managementDicts.append((self.__handled, 0, 4))
+        # keep track of merged regions
+        self.__mergeMap = defaultdict(list)
+        self.__managementDicts.append((self.__mergeMap, 0, 4))
 
     def handleSingleChunk(self, chunk):
         with self.__chunkLocks[chunk]:
-            if chunk in self.__handled:
+            if self.__handled[chunk]:
                 return set()
-            self.__handled.add(chunk)
+            self.__handled[chunk] = True
             roi = self.chunkIndexToRoi(chunk)
             data = self.Input.get(roi).wait()
             try:
@@ -179,6 +222,8 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         for t in range(roi.start[0], roi.stop[0]):
             for c in range(roi.start[4], roi.stop[4]):
                 lc = self.__labelCount[(t, c)]
+                if len(lc) == 0:
+                    continue
                 maxLabel = max(lc.keys())
                 mapping = np.arange(maxLabel+1)
                 if self.__binary:
@@ -188,3 +233,28 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
                     if n > self.__maxSize or n < self.__minSize:
                         mapping[label] = 0
                 result[t, ..., c] = mapping[result[t, ..., c]]
+
+    def _automaticChunkShape(self):
+        """
+        get chunk shape appropriate for input data
+        """
+        slot = self._Input
+        if not slot.ready():
+            return None
+
+        # use about 10MiB per chunk
+        ram = 10*1024**2
+        ram_per_pixel = slot.meta.getDtypeBytes()
+
+        def prepareShape(s):
+            return (1,) + tuple(s)[1:4] + (1,)
+
+        max_shape = prepareShape(slot.meta.shape)
+        if slot.meta.ideal_blockshape is not None:
+            ideal_shape = prepareShape(slot.meta.ideal_blockshape)
+        else:
+            ideal_shape = (1, 0, 0, 0, 1)
+
+        chunkShape = determine_optimal_request_blockshape(
+            max_shape, ideal_shape, ram_per_pixel, 1, ram)
+        return chunkShape

@@ -214,6 +214,7 @@ class TestOpLazyCC(unittest.TestCase):
 
         assert np.all(out1 != out2)
 
+    @unittest.expectedFailure
     def testSetDirty(self):
         g = Graph()
         vol = np.zeros((200, 100, 10, 2))

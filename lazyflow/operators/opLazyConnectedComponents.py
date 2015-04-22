@@ -231,7 +231,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         """
         # TODO make t, c slices independent.
         self._setDefaultInternals()
-        super(OpLazyConnectedComponents, self).setupOutputs()
+        #super(OpLazyConnectedComponents, self).setupOutputs()
         self.Output.setDirty(slice(None))
 
     def setInSlot(self, slot, subindex, key, value):
