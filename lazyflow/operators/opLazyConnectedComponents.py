@@ -32,6 +32,7 @@ import itertools
 
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
+from lazyflow.roi import determine_optimal_request_blockshape
 from lazyflow.operators import OpReorderAxes
 from lazyflow.operators.opCache import ObservableCache
 
@@ -430,12 +431,8 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
             cs = self.ChunkShape.value
             assert len(self.ChunkShape.value) == 3
             chunkShape = (1,) + cs + (1,)
-        elif self._Input.meta.ideal_blockshape is not None and\
-                np.prod(self._Input.meta.ideal_blockshape) > 0:
-            chunkShape = self._Input.meta.ideal_blockshape
         else:
-            chunkShape = self._automaticChunkShape(
-                self._Input.meta.shape)
+            chunkShape = self._automaticChunkShape()
         assert len(shape) == len(chunkShape),\
             "Encountered an invalid chunkShape"
         chunkShape = np.minimum(shape, chunkShape)
@@ -546,17 +543,30 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         logger.debug("Currently stored chunks: {}/{} ({:.1f} MB)".format(
             nStoredChunks, nChunks, cachedMB))
 
+    def _automaticChunkShape(self):
+        """
+        get chunk shape appropriate for input data
+        """
+        slot = self._Input
+        if not slot.ready():
+            return None
 
-    # choose chunk shape appropriate for a particular dataset
-    # TODO: this is by no means an optimal decision -> extend
-    @staticmethod
-    def _automaticChunkShape(shape):
-        # use about 16 million pixels per chunk 
-        default = (1, 256, 256, 256, 1)
-        if np.prod(shape) < 2*np.prod(default):
-            return (1,) + shape[1:4] + (1,)
+        # use about 10MiB per chunk
+        ram = 10*1024**2
+        ram_per_pixel = slot.meta.getDtypeBytes()
+
+        def prepareShape(s):
+            return (1,) + tuple(s)[1:4] + (1,)
+
+        max_shape = prepareShape(slot.meta.shape)
+        if slot.meta.ideal_blockshape is not None:
+            ideal_shape = prepareShape(slot.meta.ideal_blockshape)
         else:
-            return default
+            ideal_shape = (1, 0, 0, 0, 1)
+
+        chunkShape = determine_optimal_request_blockshape(
+            max_shape, ideal_shape, ram_per_pixel, 1, ram)
+        return chunkShape
 
     # ======== CACHE API ========
 
