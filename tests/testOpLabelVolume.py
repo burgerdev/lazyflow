@@ -90,8 +90,8 @@ class TestVigra(unittest.TestCase):
         op.Method.setValue(self.method)
         op.Input.setValue(vol)
 
-        out = op.Output[...].wait()
-        tags = op.Output.meta.getTaggedShape()
+        out = op.CachedOutput[...].wait()
+        tags = op.CachedOutput.meta.getTaggedShape()
         print(tags)
         out = vigra.taggedView(out, axistags="".join([s for s in tags]))
 
@@ -117,8 +117,8 @@ class TestVigra(unittest.TestCase):
         op.Method.setValue(self.method)
         op.Input.setValue(vol)
 
-        out = op.Output[...].wait()
-        tags = op.Output.meta.getTaggedShape()
+        out = op.CachedOutput[...].wait()
+        tags = op.CachedOutput.meta.getTaggedShape()
         print(tags)
         out = vigra.taggedView(out, axistags="".join([s for s in tags]))
 

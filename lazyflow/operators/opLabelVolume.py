@@ -32,14 +32,15 @@ from lazyflow.slot import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.request import Request, RequestPool
 from lazyflow.operators import OpCompressedCache, OpReorderAxes
+from opSimpleConnectedComponents import OpSimpleConnectedComponents
 from opLazyConnectedComponents import OpLazyConnectedComponents
 from opImplementationChoice import OpImplementationChoice
 
 logger = logging.getLogger(__name__)
 
 # add your labeling implementations dynamically to this dict
-# (vigra is added below)
-labeling_implementations = {'lazy': OpLazyConnectedComponents}
+# (see below the operators for examples)
+labeling_implementations = {}
 
 ## OpLabelVolume - the **unified** connected components operator
 #
@@ -61,7 +62,7 @@ class OpLabelVolume(Operator):
     #
     # currently available (see module variable labeling_implementations):
     # * 'vigra': use the fast algorithm from ukoethe/vigra
-    # * 'lazy': use the lazy algorihm OpLazyConnectedComponents
+    # * 'lazy': use the lazy algorithm OpLazyConnectedComponents
     #
     # A change here deletes all previously cached results.
     Method = InputSlot(value='vigra')
@@ -90,75 +91,49 @@ class OpLabelVolume(Operator):
     CleanBlocks = OutputSlot()
     OutputHdf5 = OutputSlot()
 
-    def __init__(self, *args, **kwargs):
-        super(OpLabelVolume, self).__init__(*args, **kwargs)
-
-        # we just want to have 5d data internally
-        op5 = OpReorderAxes(parent=self)
-        op5.Input.connect(self.Input)
-        op5.AxisOrder.setValue('txyzc')
-        self._op5 = op5
-
-        self._opLabel = OpImplementationChoice(
-            OpLabelingABC,
-            parent=self,
-            implementations=labeling_implementations,
-            choiceSlot="Method")
-        self._opLabel.Input.connect(self._op5.Output)
-        self._opLabel.Background.connect(self.Background)
-        self._opLabel.Method.connect(self.Method)
-        self._opLabel.InputHdf5.connect(self.InputHdf5)
-
-        self.CleanBlocks.connect(self._opLabel.CleanBlocks)
-        self.OutputHdf5.connect(self._opLabel.OutputHdf5)
-
-        self._op5_2 = OpReorderAxes(parent=self)
-        self._op5_2_cached = OpReorderAxes(parent=self)
-        self._op5_2.Input.connect(self._opLabel.Output)
-        self._op5_2_cached.Input.connect(self._opLabel.CachedOutput)
-
-        self.Output.connect(self._op5_2.Output)
-        self.CachedOutput.connect(self._op5_2_cached.Output)
-
-    def setupOutputs(self):
-
-        # connect reordering operators
-        self._op5_2.Input.connect(self._opLabel.Output)
-        self._op5_2_cached.Input.connect(self._opLabel.CachedOutput)
-
-        # set the final reordering operator's AxisOrder to that of the input
-        origOrder = self.Input.meta.getAxisKeys()
-        self._op5_2.AxisOrder.setValue(origOrder)
-        self._op5_2_cached.AxisOrder.setValue(origOrder)
-
-    def propagateDirty(self, slot, subindex, roi):
-        if slot == self.Method:
-            # We are changing the labeling method. In principle, the labelings
-            # are equivalent, but not necessarily the same!
-            self.Output.setDirty(slice(None))
-        elif slot == self.Input:
-            # handled by internal operator
-            pass
-
-    def setInSlot(self, slot, subindex, roi, value):
-        assert slot == self.InputHdf5,\
-            "Invalid slot for setInSlot(): {}".format( slot.name )
-        # Nothing to do here.
-        # Our Input slots are directly fed into the cache,
-        #  so all calls to __setitem__ are forwarded automatically
+    def __new__(cls, *args, **kwargs):
+        kwargs['implementations'] = labeling_implementations
+        kwargs['choiceSlot'] = 'Method'
+        op = OpImplementationChoice(OpNonLazyConnectedComponents,
+                                    *args, **kwargs)
+        op.Method.setValue('vigra')
+        return op
 
 
-## parent class for all connected component labeling implementations
-class OpLabelingABC(Operator):
-    __metaclass__ = ABCMeta
+class OpNonLazyConnectedComponents(Operator):
+    """
+    Non-lazy labeling class, which uses OpSimpleConnectedComponents
+    and OpCompressedCache. Consistency is achieved by setting the
+    OpCompressedCache.BlockShape to the entire spatial shape, leaving t
+    and c at 1.
+    """
 
-    ## input with axes 'txyzc'
+    name = "OpNonLazyConnectedComponents"
+
+    ## provide the volume to label here
+    # (arbitrary shape, dtype could be restricted, see the implementations'
+    # property supportedDtypes below)
     Input = InputSlot()
 
-    ## background value
-    Background = InputSlot(optional=True)
+    ## provide label that is treated as background
+    Background = InputSlot(value=0)
 
+    ## Labeled volume
+    # Axistags and shape are the same as on the Input, dtype is an integer
+    # datatype.
+    # This slot computes the connected component image only for the
+    # requested roi, no consistency guarantees apply! We keep this slot
+    # for backwards compatibility.
     Output = OutputSlot()
+
+    ## Cached label image
+    # Axistags and shape are the same as on the Input, dtype is an integer
+    # datatype.
+    # This slot guarantees to give consistent results for subsequent requests.
+    # For other behaviour, see the documentation of the underlying 
+    # implementation.
+    # This slot will be set dirty by time and channel if the background or the
+    # input changes for the respective time-channel-slice.
     CachedOutput = OutputSlot()
 
     # cache access, see OpCompressedCache
@@ -166,117 +141,62 @@ class OpLabelingABC(Operator):
     CleanBlocks = OutputSlot()
     OutputHdf5 = OutputSlot()
 
-    # the numeric type that is used for labeling
-    labelType = np.uint32
-
-    ## list of supported dtypes
-    @abstractproperty
-    def supportedDtypes(self):
-        pass
-
     def __init__(self, *args, **kwargs):
-        super(OpLabelingABC, self).__init__(*args, **kwargs)
-        self._cache = OpCompressedCache(parent=self)
-        self._cache.name = "OpLabelVolume.OutputCache"
-        self._cache.Input.connect(self.Output)
-        self.CachedOutput.connect(self._cache.Output)
-        self._cache.InputHdf5.connect(self.InputHdf5)
-        self.OutputHdf5.connect(self._cache.OutputHdf5)
-        self.CleanBlocks.connect(self._cache.CleanBlocks)
+        super(OpNonLazyConnectedComponents, self).__init__(*args,
+                                                           **kwargs)
+        self.__labeler = OpSimpleConnectedComponents(parent=self)
+        self.__labeler.Input.connect(self.Input)
+        self.__labeler.Background.connect(self.Background)
+        self.Output.connect(self.__labeler.Output)
+        self.__cache = None
 
     def setupOutputs(self):
+        self.__resetCache()
 
-        # check if the input dtype is valid
-        if self.Input.ready():
-            dtype = self.Input.meta.dtype
-            if dtype not in self.supportedDtypes:
-                msg = "{}: dtype '{}' not supported "\
-                    "with method 'vigra'. Supported types: {}"
-                msg = msg.format(self.name, dtype, self.supportedDtypes)
-                raise ValueError(msg)
+    def __resetCache(self):
+        if self.__cache is not None:
+            # disconnect and remove old cache
+            self.CachedOutput.disconnect()
+            self.OutputHdf5.disconnect()
+            self.CleanBlocks.disconnect()
+            self.__cache.InputHdf5.disconnect()
+            self.__cache.Input.disconnect()
+            self.__cache = None
 
-        # set cache chunk shape to the whole spatial volume
-        shape = np.asarray(self.Input.meta.shape, dtype=np.int)
-        shape[0] = 1
-        shape[4] = 1
-        self._cache.BlockShape.setValue(tuple(shape))
+        # set time, channel shape to 1
+        ts = self.Input.meta.getTaggedShape()
+        for k in ts.keys():
+            if k in 'tc':
+                ts[k] = 1
+        block_shape = tuple(ts[k] for k in ts)
+        print(block_shape)
 
-        # setup meta for Output
-        self.Output.meta.assignFrom(self.Input.meta)
-        self.Output.meta.dtype = self.labelType
+        # set up new cache
+        self.__cache = OpCompressedCache(parent=self)
+        self.__cache.BlockShape.setValue(block_shape)
+        self.CachedOutput.connect(self.__cache.Output)
+        self.OutputHdf5.connect(self.__cache.OutputHdf5)
+        self.CleanBlocks.connect(self.__cache.CleanBlocks)
+        self.__cache.InputHdf5.connect(self.InputHdf5)
+        self.__cache.Input.connect(self.__labeler.Output)
+
+    def execute(self, slot, subindex, roi, result):
+        raise RuntimeError("Internal connections are wrong")
 
     def propagateDirty(self, slot, subindex, roi):
-        # a change in either input or background makes the whole
-        # time-channel-slice dirty (CCL is a global operation)
-        outroi = roi.copy()
-        outroi.start[1:4] = (0, 0, 0)
-        outroi.stop[1:4] = self.Input.meta.shape[1:4]
-        self.Output.setDirty(outroi)
-        self.CachedOutput.setDirty(outroi)
+        # dirty propagation is handled by wrapped operator
+        pass
 
     def setInSlot(self, slot, subindex, roi, value):
-        assert slot == self.InputHdf5,\
-            "Invalid slot for setInSlot(): {}".format( slot.name )
+        msg = "Invalid slot for setInSlot(): {}".format(slot.name)
+        if slot is not self.InputHdf5:
+            raise ValueError(msg)
+        elif self.__cache is None:
+            msg = "Can't set data to slot: it is not configured yet."
+            raise RuntimeError(msg)
         # Nothing to do here.
         # Our Input slots are directly fed into the cache,
         #  so all calls to __setitem__ are forwarded automatically
 
-    def execute(self, slot, subindex, roi, result):
-        if slot == self.Output:
-            # just label the ROI and write it to result
-            self._label(roi, result)
-        else:
-            raise ValueError("Request to unknown slot {}".format(slot))
-
-    def _label(self, roi, result):
-        result = vigra.taggedView(result, axistags=self.Output.meta.axistags)
-        bg = self.Background.value
-
-        # do labeling in parallel over channels and time slices
-        pool = RequestPool()
-
-        start = np.asarray(roi.start, dtype=np.int)
-        stop = np.asarray(roi.stop, dtype=np.int)
-        for ti, t in enumerate(range(roi.start[0], roi.stop[0])):
-            start[0], stop[0] = t, t+1
-            for ci, c in enumerate(range(roi.start[4], roi.stop[4])):
-                start[4], stop[4] = c, c+1
-                newRoi = SubRegion(self.Output,
-                                   start=tuple(start), stop=tuple(stop))
-                resView = result[ti, ..., ci].withAxes(*'xyz')
-                req = Request(partial(self._label3d, newRoi,
-                                      bg, resView))
-                pool.add(req)
-
-        logger.debug(
-            "{}: Computing connected components for ROI {} ...".format(
-                self.name, roi))
-        pool.wait()
-        pool.clean()
-        logger.debug("{}: Connected components computed.".format(
-            self.name))
-
-    ## compute the requested roi and put the results into result
-    #
-    # @param result the array to write into, 3d xyz
-    @abstractmethod
-    def _label3d(self, roi, bg, result):
-        pass
-
-
-## vigra connected components
-class _OpLabelVigra(OpLabelingABC):
-    name = "OpLabelVigra"
-    supportedDtypes = [np.uint8, np.uint32, np.float32]
-
-    def _label3d(self, roi, bg, result):
-        source = vigra.taggedView(self.Input.get(roi).wait(),
-                                  axistags='txyzc').withAxes(*'xyz')
-        if source.shape[2] > 1:
-            result[:] = vigra.analysis.labelVolumeWithBackground(
-                source, background_value=int(bg))
-        else:
-            result[..., 0] = vigra.analysis.labelImageWithBackground(
-                source[..., 0], background_value=int(bg))
-
-labeling_implementations['vigra'] = _OpLabelVigra
+# add non-lazy labeling to available implementations
+labeling_implementations['vigra'] = OpNonLazyConnectedComponents

@@ -20,7 +20,7 @@
 #		   http://ilastik.org/license/
 ###############################################################################
 
-
+import numpy as np
 from lazyflow.operator import Operator, InputSlot
 
 
@@ -121,6 +121,12 @@ class OpImplementationChoice(Operator):
 
     def setupOutputs(self):
         impl = self._Implementation.value
+        while isinstance(impl, np.ndarray):
+            impl = impl[0]
+        if not isinstance(impl, str):
+            msg = "expected a string, got {}".format(type(impl))
+            raise ValueError(msg)
+
         if impl == self._current_impl:
             return
 
