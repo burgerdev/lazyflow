@@ -1069,6 +1069,138 @@ class SimpleRequestCondition(object):
             self._waiter_lock.release()
 
 
+class RequestCondition(object):
+    """
+    A ``Request``-compatible condition variable that supports a limited
+    subset of the features implemented by the standard ``threading.Condition``.
+
+    **Limitations:**
+    
+    - :py:meth:`notify()` doesn't accept the ``n`` arg.
+    - :py:meth:`wait()` doesn't support the ``timeout`` arg.
+    
+    .. note:: It would be nice if we could simply use ``threading.Condition( RequestLock() )`` instead of rolling 
+             our own custom condition variable class, but that doesn't quite work in cases where we need to call 
+             ``wait()`` from a worker thread (a non-foreign thread).
+             (``threading.Condition`` uses ``threading.Lock()`` as its 'waiter' lock, which blocks the entire worker.)
+    """
+    logger = logging.getLogger(__name__ + ".RequestCondition")
+    
+    def __init__(self):
+        if Request.global_thread_pool.num_workers == 0:
+            # Special debug mode.
+            self._debug_mode_init()
+        else:
+            self._ownership_lock = RequestLock()
+            from collections import OrderedDict, defaultdict
+            self._waiter_locks = OrderedDict()
+            self._waiter_status = defaultdict(bool)
+        
+            # Export the acquire/release methods of the ownership lock
+            self.acquire = self._ownership_lock.acquire
+            self.release = self._ownership_lock.release
+
+    def _debug_mode_init(self):
+        """
+        For debug purposes, the user can use an empty threadpool.
+        In that case, all requests are executing synchronously.
+        (See Request.submit().)
+        In this debug mode, this class is simply a stand-in for a 'real' 
+        condition variable from the builtin threading module.
+        """
+        # Special debug mode initialization: 
+        # Just use a normal condition variable.
+        condition_lock = threading.RLock()
+        self._debug_condition = threading.Condition(condition_lock)
+        self._debug_condition.locked = lambda: condition_lock._RLock__count > 0
+        self.acquire = self._debug_condition.acquire
+        self.release = self._debug_condition.release
+        self.wait = self._debug_condition.wait
+        self.notify = self._debug_condition.notify
+        
+        self._ownership_lock = self._debug_condition    
+
+    def __enter__(self):
+        return self._ownership_lock.__enter__()
+        
+    def __exit__(self, *args):
+        self._ownership_lock.__exit__(*args)
+
+    def wait(self):
+        """
+        Wait for another request to call py:meth:``notify()``.  
+        The caller **must** own (acquire) the condition before calling this method.
+        The condition is automatically ``released()`` while this method waits for 
+        ``notify()`` to be called, and automatically ``acquired()`` again before returning.
+
+        .. note:: Unlike ``threading.Condition``, no ``timeout`` parameter is accepted here.
+        """
+        myLock = RequestLock()
+        # nobody competes for this lock yet
+        myLock.acquire()
+        myKey = id(myLock)
+        assert myKey not in self._waiter_locks
+        self._waiter_locks[myKey] = myLock
+        self._waiter_status[myKey] = True
+
+        # Temporarily release the ownership lock while we wait for someone to release the waiter.
+        assert self._ownership_lock.locked(), "Forbidden to call SimpleRequestCondition.wait() unless you own the condition."
+        self._ownership_lock.release()
+        
+        # Try to acquire the lock AGAIN.
+        # This isn't possible until someone releases it via notify()
+        # (Note that RequestLock does NOT have RLock semantics.)
+        myLock.acquire()
+        
+        # Re-acquire
+        self._ownership_lock.acquire()
+
+        # Remove lock from known locks
+        del self._waiter_locks[myKey]
+
+        if myLock.locked():
+            myLock.release()
+
+
+    def notify(self):
+        """
+        Notify the condition that it can stop ``wait()``-ing.
+        The called **must** own (acquire) the condition before calling this method.
+        Also, the waiting request cannot return from ``wait()`` until the condition is released, 
+        so the caller should generally release the condition shortly after calling this method.
+        
+        .. note:: It is okay to call this from more than one request in parallel.
+        """
+        assert self._ownership_lock.locked(), "Forbidden to call SimpleRequestCondition.notify() unless you own the condition."
+
+        # check if we have any waiters
+        num_waiters = len(self._waiter_locks)
+        if len(self._waiter_locks) == 0:
+            return
+
+        # Release a waiter
+        for key in self._waiter_locks.keys():
+            lock = self._waiter_locks[key]
+            if self._waiter_status[key]:
+                del self._waiter_status[key]
+                lock.release()
+                break
+
+    def notify_all(self):
+        assert self._ownership_lock.locked(), "Forbidden to call SimpleRequestCondition.notify() unless you own the condition."
+
+        # check if we have any waiters
+        if len(self._waiter_locks) == 0:
+            return
+
+        # Release all waiters
+        for key in self._waiter_locks.keys():
+            lock = self._waiter_locks[key]
+            if self._waiter_status[key]:
+                del self._waiter_status[key]
+                lock.release()
+
+
 class RequestPool(object):
     """
     Convenience class for submitting a batch of requests and waiting until they are all complete.

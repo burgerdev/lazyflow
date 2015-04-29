@@ -26,7 +26,8 @@ from abc import abstractmethod
 import numpy as np
 import vigra
 
-from threading import Lock, Condition
+from lazyflow.request import RequestLock as Lock
+from lazyflow.request import RequestCondition as Condition
 from collections import defaultdict
 import itertools
 import functools

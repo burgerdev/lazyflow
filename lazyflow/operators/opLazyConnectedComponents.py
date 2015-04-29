@@ -23,7 +23,6 @@
 import numpy as np
 import vigra
 import h5py
-from threading import Condition
 from threading import Lock as HardLock
 
 from collections import defaultdict
@@ -33,18 +32,21 @@ import itertools
 from lazyflow.operator import Operator, InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.roi import determine_optimal_request_blockshape
+from lazyflow.request import RequestLock
 from lazyflow.operators import OpReorderAxes
 from lazyflow.operators.opCache import ObservableCache
+from lazyflow.operators.opCompressedCache import OpCompressedCache
 
 from lazyflow.operators.opLazyRegionGrowing import OpLazyRegionGrowing
+from lazyflow.operators.opSimpleConnectedComponents import\
+    OpSimpleConnectedComponents
 from lazyflow.operators.opLazyRegionGrowing import threadsafe
 
 import logging
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
-
-# the lazyflow lock seems to have deadlock issues sometimes
-Lock = HardLock
+Lock = RequestLock
 _LABEL_TYPE = np.uint32
 
 
@@ -137,41 +139,21 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
     # input data (usually segmented)
     Input = InputSlot()
 
-    # the spatial shape of one chunk, in 'xyz' order
-    # (even if the input does lack some axis, you *have* to provide a
-    # 3-tuple here) 
-    ChunkShape = InputSlot(optional=True)
-
     # background with axes 'txyzc', spatial axes must be singletons
     # (this layout is needed to be compatible with OpLabelVolume)
     Background = InputSlot(value=0)
 
-    # the labeled output, internally cached (the two slots are the same)
+    # the labeled output
     Output = OutputSlot()
-    CachedOutput = OutputSlot()
-
-    # cache access slots, see OpCompressedCache
-
-    # fill the cache from an HDF5 group
-    InputHdf5 = InputSlot(optional=True)
-
-    # returns an object array of length 1 that contains a list of 2-tuples
-    # first item is block start, second item is block stop (exclusive)
-    CleanBlocks = OutputSlot()
-
-    # fills an HDF5 group with data from cache, requests must be for exactly
-    # one block
-    OutputHdf5 = OutputSlot()
 
     ### INTERNALS -- DO NOT USE ###
+    _Labels = OutputSlot()
     _Input = OutputSlot()
     _Output = OutputSlot()
 
     def __init__(self, *args, **kwargs):
         super(OpLazyConnectedComponents, self).__init__(*args, **kwargs)
-        self._lock = HardLock()
-        # be able to request usage stats right from initialization
-        self._cache = None
+        self._lock = Lock()
 
         # reordering operators - we want to handle txyzc inside this operator
         self._opIn = OpReorderAxes(parent=self)
@@ -179,26 +161,24 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         self._opIn.Input.connect(self.Input)
         self._Input.connect(self._opIn.Output)
 
+        self._labeler = OpSimpleConnectedComponents(parent=self)
+        self._labeler.Input.connect(self._Input)
+        self._labeler.Background.connect(self.Background)
+        self._labelCache = None
+
         self._opOut = OpReorderAxes(parent=self)
         self._opOut.Input.connect(self._Output)
         self.Output.connect(self._opOut.Output)
-        self.CachedOutput.connect(self.Output)
         
         # Now that we're initialized, it's safe to register with the memory manager
         self.registerWithMemoryManager()
 
     def setupOutputs(self):
-        self.Output.meta.assignFrom(self.Input.meta)
-        self.Output.meta.dtype = _LABEL_TYPE
         self._Output.meta.assignFrom(self._Input.meta)
         self._Output.meta.dtype = _LABEL_TYPE
         if not self.Input.meta.dtype in self.supportedDtypes:
             raise ValueError(
                 "Cannot label data type {}".format(self.Input.meta.dtype))
-
-        self.OutputHdf5.meta.assignFrom(self.Input.meta)
-        self.CleanBlocks.meta.shape = (1,)
-        self.CleanBlocks.meta.dtype = np.object
 
         self._setDefaultInternals()
         super(OpLazyConnectedComponents, self).setupOutputs()
@@ -206,15 +186,21 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         # go back to original order
         self._opOut.AxisOrder.setValue(self.Input.meta.getAxisKeys())
 
+        # set up label cache
+        if self._labelCache is not None:
+            self._Labels.disconnect()
+            self._labelCache.Input.disconnect()
+            self._labelCache = None
+
+        self._labelCache = OpCompressedCache(parent=self)
+        self._labelCache.Input.connect(self._labeler.Output)
+        self._Labels.connect(self._labelCache.Output)
+        self._labelCache.BlockShape.setValue(self._chunkShape)
+
     def execute(self, slot, subindex, roi, result):
         if slot is self._Output:
             logger.debug("Execute for {}".format(roi))
             self.executeRegionGrowing(roi, result)
-            self._report()
-        elif slot == self.OutputHdf5:
-            self._executeOutputHdf5(roi, result)
-        elif slot == self.CleanBlocks:
-            self._executeCleanBlocks(result)
         else:
             raise ValueError("Request to invalid slot {}".format(str(slot)))
 
@@ -234,13 +220,6 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         #super(OpLazyConnectedComponents, self).setupOutputs()
         self.Output.setDirty(slice(None))
 
-    def setInSlot(self, slot, subindex, key, value):
-        if slot == self.InputHdf5:
-            self._setInSlotInputHdf5(slot, subindex, key, value)
-        else:
-            raise ValueError(
-                "setInSlot() not supported for slot {}".format(slot))
-
     def shape(self):
         return getattr(self, "_shape", None)
 
@@ -254,31 +233,17 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
             return set()
 
         roi = self.chunkIndexToRoi(chunkIndex)
-        logger.debug("labeling chunk {} ({})".format(chunkIndex, roi))
-        # get the raw data
-        inputChunk = self._Input.get(roi).wait()
-        inputChunk = vigra.taggedView(inputChunk, axistags='txyzc')
-        inputChunk = inputChunk.withAxes(*'xyz')
+        logger.debug("requesting labels for chunk {} ({})".format(
+            chunkIndex, roi))
+        labeled = self._Labels.get(roi).wait()
+        labeled = vigra.taggedView(labeled,
+                                   axistags=self._Labels.meta.axistags)
 
-        # label the raw data
-        bg = self._background
-        # a vigra bug forces us to convert to int here
-        bg = int(bg)
-        # TODO use labelMultiArray once available
-        labeled = vigra.analysis.labelVolumeWithBackground(inputChunk,
-                                                           background_value=bg)
-        labeled = vigra.taggedView(labeled, axistags='xyz').withAxes(*'txyzc')
-        del inputChunk
-        # TODO this could be more efficiently combined with merging
-
-        # store the labeled data in cache
-        self._cache[roi.toSlice()] = labeled
-
-        # update the labeling information
+        # update the labeling information        
         numLabels = labeled.max()  # we ignore 0 here
         self._numIndices[chunkIndex] = numLabels
         if numLabels > 0:
-            with self._lock:
+            with self._lock: 
                 # determine the offset
                 # localLabel + offset = globalLabel (for localLabel>0)
                 offset = self._uf.makeNewIndex()
@@ -306,9 +271,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         the chunks have to be ordered lexicographically, e.g. by self._orderPair
         """
         if chunkB in self._mergeMap[chunkA]:
-            return (np.zeros((0,), dtype=_LABEL_TYPE),)*2
-        assert not self._isFinal[chunkA]
-        assert not self._isFinal[chunkB]
+            return set(), set()
         self._mergeMap[chunkA].append(chunkB)
 
         hyperplane_roi_a, hyperplane_roi_b = \
@@ -316,8 +279,8 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         hyperplane_index_a = hyperplane_roi_a.toSlice()
         hyperplane_index_b = hyperplane_roi_b.toSlice()
 
-        label_hyperplane_a = self._cache[hyperplane_index_a]
-        label_hyperplane_b = self._cache[hyperplane_index_b]
+        label_hyperplane_a = self._Labels.get(hyperplane_roi_a).wait()
+        label_hyperplane_b = self._Labels.get(hyperplane_roi_b).wait()
 
         # see if we have border labels at all
         adjacent_bool_inds = np.logical_and(label_hyperplane_a > 0,
@@ -326,10 +289,10 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
             return set(), set()
 
         # check if the labels do actually belong to the same component
-        hyperplane_a = self._Input[hyperplane_index_a].wait()
-        hyperplane_b = self._Input[hyperplane_index_b].wait()
-        adjacent_bool_inds = np.logical_and(adjacent_bool_inds,
-                                            hyperplane_a == hyperplane_b)
+        hyperplane_a = self._Input.get(hyperplane_roi_a).wait()
+        hyperplane_b = self._Input.get(hyperplane_roi_b).wait()
+        adjacent_bool_inds = np.logical_and(
+            adjacent_bool_inds, hyperplane_a == hyperplane_b)
 
         # union find manipulations are critical
         with self._lock:
@@ -356,35 +319,32 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
             newroi = self.chunkIndexToRoi(idx)
             newroi.stop = np.minimum(newroi.stop, roi.stop)
             newroi.start = np.maximum(newroi.start, roi.start)
-            self._mapChunk(idx)
-            chunk = self._cache[newroi.toSlice()]
+            chunk = self._Labels.get(newroi).wait()
+            final_chunk = self._mapChunk(idx, chunk)
             newroi.start -= roi.start
             newroi.stop -= roi.start
-            s = newroi.toSlice()
-            result[s] = chunk
+            result_slice = newroi.toSlice()
+            result[result_slice] = final_chunk
 
-    # Store a chunk with final labels in cache
-    @_chunksynchronized
-    def _mapChunk(self, chunkIndex):
-        if self._isFinal[chunkIndex]:
-            return
-
-        newroi = self.chunkIndexToRoi(chunkIndex)
-        s = newroi.toSlice()
-        chunk = self._cache[s]
+    def _mapChunk(self, chunkIndex, local_labeling):
+        """
+        map local labels for this chunk to final labels
+        """
         labels = self.localToGlobal(chunkIndex)
         labels = self.globalToFinal(chunkIndex[0], chunkIndex[4], labels)
-        self._cache[s] = labels[chunk]
+        finalized_chunk = labels[local_labeling]
+        return finalized_chunk
 
-        self._isFinal[chunkIndex] = True
-
-    # returns an array of global labels in use by this chunk. This array can be
-    # used as a mapping via
-    #   mapping = localToGlobal(...)
-    #   mapped = mapping[locallyLabeledArray]
-    # The global labels are updated to their current state according to the
-    # global UnionFind structure.
     def localToGlobal(self, chunkIndex):
+        """
+        get an array of global labels in use by this chunk
+
+        This array can be used as a mapping via
+            mapping = localToGlobal(...)
+            mapped = mapping[locallyLabeledArray]
+        The global labels are updated to their current state according
+        to the global UnionFind structure.
+        """
         offset = self._globalLabelOffset[chunkIndex]
         numLabels = self._numIndices[chunkIndex]
         labels = np.arange(1, numLabels+1, dtype=_LABEL_TYPE) + offset
@@ -398,11 +358,13 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         out[1:] = labels
         return out
 
-    # map an array of global indices to final labels
-    # after calling this function, the labels passed in may not be used with
-    # UnionFind.makeUnion any more!
-    @threadsafe
     def globalToFinal(self, t, c, labels):
+        """
+        map an array of global indices to final labels
+
+        after calling this function, the labels passed in may not be
+        used with UnionFind.makeUnion any more!
+        """
         newlabels = labels.copy()
         d = self._globalToFinal[(t, c)]
         labeler = self._labelIterators[(t, c)]
@@ -421,42 +383,26 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
     ##################### HELPER METHODS #####################################
     ##########################################################################
 
-
-    # fills attributes with standard values, call on each setupOutputs
     def _setDefaultInternals(self):
+        """
+        fills attributes with standard values
+
+        Must be called on each setupOutputs()
+        """
         # chunk array shape calculation
         shape = self._Input.meta.shape
         assert len(shape) == 5
-        if self.ChunkShape.ready():
-            cs = self.ChunkShape.value
-            assert len(self.ChunkShape.value) == 3
-            chunkShape = (1,) + cs + (1,)
-        else:
-            chunkShape = self._automaticChunkShape()
+        chunkShape = self._automaticChunkShape()
         assert len(shape) == len(chunkShape),\
             "Encountered an invalid chunkShape"
-        chunkShape = np.minimum(shape, chunkShape)
         self._chunkShape = np.asarray(chunkShape, dtype=np.int)
         self._shape = shape
 
-        # determine the background values
-        self._background = self.Background.value
-
-        ### local labels ###
-        # cache for local labels
-        # adjust cache chunk shape to our chunk shape
-        cs = tuple(map(_get_next_power, self._chunkShape))
-        logger.debug("Creating cache with chunk shape {}".format(cs))
-        self._cache = vigra.ChunkedArrayCompressed(
-            shape, dtype=_LABEL_TYPE, chunk_shape=cs)
-
         ### global indices ###
         # offset (global labels - local labels) per chunk
-        # self._globalLabelOffset = np.ones(self._chunkArrayShape,
-        #                                   dtype=_LABEL_TYPE)
         self._globalLabelOffset = defaultdict(partial(_LABEL_TYPE, 1))
+
         # keep track of number of indices in chunk (-1 == not labeled yet)
-        # self._numIndices = -np.ones(self._chunkArrayShape, dtype=np.int32)
         self._numIndices = defaultdict(partial(np.int32, -1))
 
         # union find data structure, tells us for every global index to which
@@ -468,8 +414,6 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         gen = partial(InfiniteLabelIterator, 1, dtype=_LABEL_TYPE)
         self._labelIterators = defaultdict(gen)
         self._globalToFinal = defaultdict(dict)
-        # self._isFinal = np.zeros(self._chunkArrayShape, dtype=np.bool)
-        self._isFinal = defaultdict(lambda: False)
 
         ### algorithmic ###
 
@@ -477,71 +421,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         self._mergeMap = defaultdict(list)
 
         # locks that keep threads from changing a specific chunk
-        self._chunk_locks = defaultdict(HardLock)
-
-    def _executeCleanBlocks(self, destination):
-        assert destination.shape == (1,)
-        # finalIndices = np.where(self._isFinal)
-        finalIndices = filter(lambda x: self._isFinal[x],
-                              self._isFinal.keys())
-
-        def ind2tup(ind):
-            roi = self.chunkIndexToRoi(ind)
-            return (roi.start, roi.stop)
-
-        # destination[0] = list(map(ind2tup, zip(*finalIndices)))
-        destination[0] = list(map(ind2tup, finalIndices))
-
-    def _executeOutputHdf5(self, roi, destination):
-        logger.debug("Servicing request for hdf5 block {}".format(roi))
-
-        assert isinstance(destination, h5py.Group),\
-            "OutputHdf5 slot requires an hdf5 GROUP to copy into "\
-            "(not a numpy array)."
-        index = self.roiToChunkIndex(roi)[0]
-        block_roi = self.chunkIndexToRoi(index)
-        valid = np.all(roi.start == block_roi.start)
-        valid = valid and np.all(roi.stop == block_roi.stop)
-        assert valid, "OutputHdf5 slot requires roi to be exactly one block."
-
-        name = str([block_roi.start, block_roi.stop])
-        assert name not in destination,\
-            "destination hdf5 group already has a dataset "\
-            "with this block's name"
-        destination.create_dataset(name, shape=self._chunkShape,
-                                   dtype=_LABEL_TYPE,
-                                   data=self._cache[block_roi.toSlice()])
-
-    def _setInSlotInputHdf5(self, slot, subindex, roi, value):
-        logger.debug("Setting block {} from hdf5".format(roi))
-        assert isinstance(value, h5py.Dataset),\
-            "InputHdf5 slot requires an hdf5 Dataset to copy from "\
-            "(not a numpy array)."
-
-        indices = self.roiToChunkIndex(roi)
-        for idx in indices:
-            cacheroi = self.chunkIndexToRoi(idx)
-            cacheroi.stop = np.minimum(cacheroi.stop, roi.stop)
-            cacheroi.start = np.maximum(cacheroi.start, roi.start)
-            dsroi = cacheroi.copy()
-            dsroi.start -= roi.start
-            dsroi.stop -= roi.start
-            self._cache[cacheroi.toSlice()] = value[dsroi.toSlice()]
-            self._isFinal[idx] = True
-
-    # print a summary of blocks in use and their storage volume
-    def _report(self):
-        m = {np.uint8: 1, np.uint16: 2, np.uint32: 4, np.uint64: 8}
-        # nStoredChunks = self._isFinal.sum()
-        finalchunks = filter(lambda k: self._isFinal[k],
-                             self._isFinal.keys())
-        nStoredChunks = reduce(lambda x, y: x + 1, finalchunks, 0)
-        # nChunks = self._isFinal.size
-        nChunks = len(self._isFinal.keys())
-        cachedMB = self._cache.data_bytes/1024.0**2
-        rawMB = self._cache.size * m[_LABEL_TYPE]
-        logger.debug("Currently stored chunks: {}/{} ({:.1f} MB)".format(
-            nStoredChunks, nChunks, cachedMB))
+        self._chunk_locks = defaultdict(Lock)
 
     def _automaticChunkShape(self):
         """
@@ -564,17 +444,19 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         else:
             ideal_shape = (1, 0, 0, 0, 1)
 
+        if np.prod(ideal_shape) > 0:
+            return np.minimum(ideal_shape, max_shape)
+
         chunkShape = determine_optimal_request_blockshape(
             max_shape, ideal_shape, ram_per_pixel, 1, ram)
+        logger.debug("Using chunk shape {}".format(chunkShape))
         return chunkShape
 
     # ======== CACHE API ========
 
     def usedMemory(self):
-        if self._cache is not None:
-            return self._cache.data_bytes
-        else:
-            return 0
+        #TODO check administrative data
+        return 0
 
     def fractionOfUsedMemoryDirty(self):
         # we do not handle dirtyness
@@ -590,21 +472,22 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 ###########
 
 
-# python implementation of vigra's UnionFindArray structure
 class UnionFindArray(object):
+    """
+    python implementation of vigra's UnionFindArray structure
+    """
 
     def __init__(self, nextFree=1):
         self._map = dict(zip(*(xrange(nextFree),)*2))
-        self._lock = HardLock()
+        self._lock = Lock()
         self._nextFree = nextFree
         self._it = None
 
-    ## join regions a and b
-    # callback is called whenever two regions are joined that were
-    # separate before, signature is 
-    #   callback(smaller_label, larger_label)
     @threadsafe
     def makeUnion(self, a, b):
+        """
+        join regions a and b
+        """
         assert a in self._map
         assert b in self._map
 
@@ -659,10 +542,3 @@ class InfiniteLabelIterator(object):
         assert a < np.iinfo(self.dtype).max, "Label overflow."
         self.n += 1
         return a
-
-
-def _get_next_power(x, n=2):
-    a = 1
-    while a < x:
-        a *= n
-    return a
