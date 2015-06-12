@@ -160,6 +160,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         self._opIn.AxisOrder.setValue('txyzc')
         self._opIn.Input.connect(self.Input)
         self._Input.connect(self._opIn.Output)
+        self._Input.notifyDirty(self._propagateDirty)
 
         self._labeler = OpSimpleConnectedComponents(parent=self)
         self._labeler.Input.connect(self._Input)
@@ -205,6 +206,9 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
             raise ValueError("Request to invalid slot {}".format(str(slot)))
 
     def propagateDirty(self, slot, subindex, roi):
+        pass
+
+    def _propagateDirty(self, slot, roi):
         """
         Dirty handling is not trivial with this operator. The worst
         case happens when an object disappears entirely, meaning that
@@ -215,10 +219,30 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         simplest valid decision is to set the whole output dirty in
         every case.
         """
-        # TODO make t, c slices independent.
-        self._setDefaultInternals()
-        #super(OpLazyConnectedComponents, self).setupOutputs()
-        self.Output.setDirty(slice(None))
+        if not self._Input.ready():
+            # no need to propagate
+            return
+
+        start = np.asarray(roi.start, dtype=int)
+        stop = np.asarray(roi.stop, dtype=int)
+        start[1:4] = 0
+        stop[1:4] = self._Input.meta.shape[1:4]
+        newroi = SubRegion(self._Output,
+                           start=tuple(start), stop=tuple(stop))
+
+        chunkDicts = [self._numIndices, self._globalLabelOffset,
+                      self._mergeMap, self._chunk_locks]
+        for idx in self.roiToChunkIndex(newroi):
+            for d in chunkDicts:
+                if idx in d:
+                    del d[idx]
+
+        tcDicts = [self._globalToFinal, aelf._labelIterators]
+        for t in xrange(start[0], stop[0]):
+            for c in xrange(start[4], stop[4]):
+                for d in tcDicts
+
+        self.Output.setDirty(newroi)
 
     def shape(self):
         return getattr(self, "_shape", None)
@@ -301,6 +325,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
             labels_a = map_a[label_hyperplane_a[adjacent_bool_inds]]
             labels_b = map_b[label_hyperplane_b[adjacent_bool_inds]]
             for a, b in zip(labels_a, labels_b):
+                #FIXME this should be [t, c]
                 assert a not in self._globalToFinal, "Invalid merge"
                 assert b not in self._globalToFinal, "Invalid merge"
                 self._uf.makeUnion(a, b)
@@ -407,6 +432,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
         # union find data structure, tells us for every global index to which
         # label it belongs
+        #FIXME should be per t/c
         self._uf = UnionFindArray(_LABEL_TYPE(1))
 
         ### global labels ###

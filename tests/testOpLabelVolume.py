@@ -303,12 +303,6 @@ class TestLazy(TestVigra):
     def testNoRecomputation(self):
         pass
 
-    # setting particular regions dirty is currently not supported by lazy
-    # connected components
-    @unittest.expectedFailure
-    def testSetDirty(self):
-        super(TestLazy, self).testSetDirty()
-
     def testThreadSafety(self):
         g = Graph()
 

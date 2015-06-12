@@ -215,7 +215,6 @@ class TestOpLazyCC(unittest.TestCase):
 
         assert np.all(out1 != out2)
 
-    @unittest.expectedFailure
     def testSetDirty(self):
         g = Graph()
         vol = np.zeros((200, 100, 10, 2))
@@ -224,8 +223,7 @@ class TestOpLazyCC(unittest.TestCase):
         vol[:200, ...] = 1
 
         op = OpLazyCC(graph=g)
-        op.Input.meta.ideal_blockshape = (100, 20, 5)
-        op.ChunkShape.setValue((100, 20, 5))
+        op.Input.meta.ideal_blockshape = (100, 20, 5, 1)
         op.Input.setValue(vol)
 
         opCheck = DirtyAssert(graph=g)
