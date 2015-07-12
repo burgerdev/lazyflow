@@ -293,7 +293,6 @@ class TestOpLazyCC(unittest.TestCase):
         op = OpLazyCC(graph=Graph())
         op.Input.meta.ideal_blockshape = (64, 64, 64)
         op.Input.setValue(vol)
-        op.ChunkShape.setValue((64, 64, 64))
         out1 = op.Output[...].wait()
         out2 = vigra.analysis.labelVolumeWithBackground(vol)
         assertEquivalentLabeling(out1.view(np.ndarray), out2.view(np.ndarray))

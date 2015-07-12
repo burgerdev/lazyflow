@@ -44,7 +44,6 @@ from lazyflow.operators.opLazyRegionGrowing import threadsafe
 
 import logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
 
 Lock = RequestLock
 _LABEL_TYPE = np.uint32
@@ -230,19 +229,23 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         newroi = SubRegion(self._Output,
                            start=tuple(start), stop=tuple(stop))
 
-        chunkDicts = [self._numIndices, self._globalLabelOffset,
-                      self._mergeMap, self._chunk_locks]
-        for idx in self.roiToChunkIndex(newroi):
-            for d in chunkDicts:
-                if idx in d:
-                    del d[idx]
+        with self._lock:
+            chunkDicts = [self._numIndices, self._globalLabelOffset,
+                          self._mergeMap, self._chunk_locks]
+            for idx in self.roiToChunkIndex(newroi):
+                for d in chunkDicts:
+                    if idx in d:
+                        del d[idx]
 
-        tcDicts = [self._globalToFinal, aelf._labelIterators]
-        for t in xrange(start[0], stop[0]):
-            for c in xrange(start[4], stop[4]):
-                for d in tcDicts
+            tcDicts = [self._globalToFinal, self._labelIterators]
+            for t in xrange(start[0], stop[0]):
+                for c in xrange(start[4], stop[4]):
+                    k = t, c
+                    for d in tcDicts:
+                        if k in d:
+                            del d[k]
 
-        self.Output.setDirty(newroi)
+        self._Output.setDirty(newroi)
 
     def shape(self):
         return getattr(self, "_shape", None)
