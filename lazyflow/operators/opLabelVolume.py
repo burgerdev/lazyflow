@@ -20,27 +20,25 @@
 #		   http://ilastik.org/license/
 ###############################################################################
 
-from functools import partial
-from abc import ABCMeta, abstractmethod, abstractproperty
 import logging
 
 import numpy as np
-import vigra
 
 from lazyflow.operator import Operator
 from lazyflow.slot import InputSlot, OutputSlot
-from lazyflow.rtype import SubRegion
-from lazyflow.request import Request, RequestPool
-from lazyflow.operators import OpCompressedCache, OpReorderAxes
+from lazyflow.operators import OpCompressedCache
 from opSimpleConnectedComponents import OpSimpleConnectedComponents
 from opLazyConnectedComponents import OpLazyConnectedComponents
 from opImplementationChoice import OpImplementationChoice
+
+from lazyflow.roi import determineBlockShape
 
 logger = logging.getLogger(__name__)
 
 # add your labeling implementations dynamically to this dict
 # (see below the operators for examples)
 labeling_implementations = {}
+
 
 ## OpLabelVolume - the **unified** connected components operator
 #
@@ -94,21 +92,18 @@ class OpLabelVolume(Operator):
     def __new__(cls, *args, **kwargs):
         kwargs['implementations'] = labeling_implementations
         kwargs['choiceSlot'] = 'Method'
-        op = OpImplementationChoice(OpNonLazyConnectedComponents,
+        op = OpImplementationChoice(OpCachedLabeling,
                                     *args, **kwargs)
         op.Method.setValue('vigra')
         return op
 
 
-class OpNonLazyConnectedComponents(Operator):
+class OpCachedLabeling(Operator):
     """
-    Non-lazy labeling class, which uses OpSimpleConnectedComponents
-    and OpCompressedCache. Consistency is achieved by setting the
-    OpCompressedCache.BlockShape to the entire spatial shape, leaving t
-    and c at 1.
+    abstract class for labeling with cache
     """
 
-    name = "OpNonLazyConnectedComponents"
+    name = "OpCachedLabeling"
 
     ## provide the volume to label here
     # (arbitrary shape, dtype could be restricted, see the implementations'
@@ -142,9 +137,8 @@ class OpNonLazyConnectedComponents(Operator):
     OutputHdf5 = OutputSlot()
 
     def __init__(self, *args, **kwargs):
-        super(OpNonLazyConnectedComponents, self).__init__(*args,
-                                                           **kwargs)
-        self.__labeler = OpSimpleConnectedComponents(parent=self)
+        super(OpCachedLabeling, self).__init__(*args, **kwargs)
+        self.__labeler = self._getLabeler()
         self.__labeler.Input.connect(self.Input)
         self.__labeler.Background.connect(self.Background)
         self.Output.connect(self.__labeler.Output)
@@ -163,13 +157,7 @@ class OpNonLazyConnectedComponents(Operator):
             self.__cache.Input.disconnect()
             self.__cache = None
 
-        # set time, channel shape to 1
-        ts = self.Input.meta.getTaggedShape()
-        for k in ts.keys():
-            if k in 'tc':
-                ts[k] = 1
-        block_shape = tuple(ts[k] for k in ts)
-        print(block_shape)
+        block_shape = self._getBlockShape()
 
         # set up new cache
         self.__cache = OpCompressedCache(parent=self)
@@ -179,6 +167,28 @@ class OpNonLazyConnectedComponents(Operator):
         self.CleanBlocks.connect(self.__cache.CleanBlocks)
         self.__cache.InputHdf5.connect(self.InputHdf5)
         self.__cache.Input.connect(self.__labeler.Output)
+
+    def _getBlockShape(self):
+        # set time, channel shape to 1
+        ts = self.Input.meta.getTaggedShape()
+        spatial = []
+        spatial_keys = []
+        for k in ts.keys():
+            if k in 'tc':
+                ts[k] = 1
+            else:
+                spatial.append(ts[k])
+                spatial_keys.append(k)
+        max_shape = tuple(ts[k] for k in ts)
+
+        if self.Input.meta.ideal_blockshape is not None:
+            shape = self.Input.meta.ideal_blockshape
+            shape = np.where(shape > 0, shape, max_shape)
+            shape = np.max(shape, max_shape)
+        else:
+            # go for blocks of roughly 10MiB size (e.g. 1024x1024x10)
+            shape = determineBlockShape(max_shape, 10*1024**2)
+        return shape
 
     def execute(self, slot, subindex, roi, result):
         raise RuntimeError("Internal connections are wrong")
@@ -198,5 +208,64 @@ class OpNonLazyConnectedComponents(Operator):
         # Our Input slots are directly fed into the cache,
         #  so all calls to __setitem__ are forwarded automatically
 
+
+class OpLazyCC(OpCachedLabeling):
+    """
+    lazy labeling class
+    """
+
+    name = "OpLazyCC"
+
+    def _getLabeler(self):
+        return OpLazyConnectedComponents(parent=self)
+
+    def _getBlockShape(self):
+        # set time, channel shape to 1
+        ts = self.Input.meta.getTaggedShape()
+        spatial = []
+        spatial_keys = []
+        for k in ts.keys():
+            if k in 'tc':
+                ts[k] = 1
+            else:
+                spatial.append(ts[k])
+                spatial_keys.append(k)
+        max_shape = tuple(ts[k] for k in ts)
+
+        if self.Input.meta.ideal_blockshape is not None:
+            shape = self.Input.meta.ideal_blockshape
+            shape = np.where(shape > 0, shape, max_shape)
+            print(shape, max_shape)
+            shape = np.maximum(shape, max_shape)
+        else:
+            # go for blocks of roughly 10MiB size (e.g. 1024x1024x10)
+            shape = determineBlockShape(max_shape, 10*1024**2)
+        return shape
+
+# add lazy labeling to available implementations
+labeling_implementations['lazy'] = OpLazyCC
+
+
+class OpNonLazyCC(OpCachedLabeling):
+    """
+    Non-lazy labeling class, which uses OpSimpleConnectedComponents.
+    Consistency is achieved by setting the OpCompressedCache.BlockShape to the
+    entire spatial shape, leaving t and c at 1.
+    """
+
+    name = "OpNonLazyCC"
+
+    def _getLabeler(self):
+        return OpSimpleConnectedComponents(parent=self)
+
+    def _getBlockShape(self):
+        # set time, channel shape to 1
+        ts = self.Input.meta.getTaggedShape()
+        for k in ts.keys():
+            if k in 'tc':
+                ts[k] = 1
+        block_shape = tuple(ts[k] for k in ts)
+        return block_shape
+
 # add non-lazy labeling to available implementations
-labeling_implementations['vigra'] = OpNonLazyConnectedComponents
+labeling_implementations['vigra'] = OpNonLazyCC

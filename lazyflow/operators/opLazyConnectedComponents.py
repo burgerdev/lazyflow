@@ -22,14 +22,11 @@
 
 import numpy as np
 import vigra
-import h5py
-from threading import Lock as HardLock
 
 from collections import defaultdict
 from functools import partial, wraps
-import itertools
 
-from lazyflow.operator import Operator, InputSlot, OutputSlot
+from lazyflow.operator import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.roi import determine_optimal_request_blockshape
 from lazyflow.request import RequestLock
@@ -169,14 +166,14 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         self._opOut = OpReorderAxes(parent=self)
         self._opOut.Input.connect(self._Output)
         self.Output.connect(self._opOut.Output)
-        
+
         # Now that we're initialized, it's safe to register with the memory manager
         self.registerWithMemoryManager()
 
     def setupOutputs(self):
         self._Output.meta.assignFrom(self._Input.meta)
         self._Output.meta.dtype = _LABEL_TYPE
-        if not self.Input.meta.dtype in self.supportedDtypes:
+        if self.Input.meta.dtype not in self.supportedDtypes:
             raise ValueError(
                 "Cannot label data type {}".format(self.Input.meta.dtype))
 
@@ -266,11 +263,11 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         labeled = vigra.taggedView(labeled,
                                    axistags=self._Labels.meta.axistags)
 
-        # update the labeling information        
+        # update the labeling information
         numLabels = labeled.max()  # we ignore 0 here
         self._numIndices[chunkIndex] = numLabels
         if numLabels > 0:
-            with self._lock: 
+            with self._lock:
                 # determine the offset
                 # localLabel + offset = globalLabel (for localLabel>0)
                 offset = self._uf.makeNewIndex()
@@ -295,7 +292,8 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         """
         merge the labels of two adjacent chunks
 
-        the chunks have to be ordered lexicographically, e.g. by self._orderPair
+        the chunks have to be ordered lexicographically, e.g. by
+        self._orderPair
         """
         if chunkB in self._mergeMap[chunkA]:
             return set(), set()
@@ -303,8 +301,6 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
         hyperplane_roi_a, hyperplane_roi_b = \
             self.chunkIndexToHyperplane(chunkA, chunkB)
-        hyperplane_index_a = hyperplane_roi_a.toSlice()
-        hyperplane_index_b = hyperplane_roi_b.toSlice()
 
         label_hyperplane_a = self._Labels.get(hyperplane_roi_a).wait()
         label_hyperplane_b = self._Labels.get(hyperplane_roi_b).wait()
@@ -548,6 +544,7 @@ class UnionFindArray(object):
 
     def __str__(self):
         s = "<UnionFindArray>\n{}".format(self._map)
+        return s
 
     def __getstate__(self):
         odict = self.__dict__.copy()
