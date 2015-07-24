@@ -131,7 +131,7 @@ class TestOpImplementationChoice(unittest.TestCase):
         out = wrap.Output[...].wait()
 
         vol2 = np.zeros((5, 6, 7))
-        vol2 = vigra.taggedView(vol2, axistags='xyz')
+        vol2 = vigra.taggedView(vol2, axistags='xyc')
         wrap.Input.setValue(vol2)
         # check if setupOutputs still works
         assert vol2.shape == wrap.Output.meta.shape, "setupOutputs not called"
