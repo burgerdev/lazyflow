@@ -327,7 +327,6 @@ class TestOpLazyCC(unittest.TestCase):
                         dtype=op.Output.meta.dtype)
         for z in reversed(range(500)):
             out1[..., z:z+1] = op.Output[..., z:z+1].wait()
-        vigra.writeHDF5(out1, '/tmp/data.h5', 'data')
         out2 = vigra.analysis.labelVolumeWithBackground(vol)
         assertEquivalentLabeling(out1.view(np.ndarray), out2.view(np.ndarray))
 
@@ -412,7 +411,7 @@ class TestOpLazyCC(unittest.TestCase):
         vol = vol.astype(np.uint8)
         vol = vigra.taggedView(vol, axistags='txyzc')
 
-        vol[:, 3:7, 3:7, :] = 1
+        vol[:, 3:7, 3:7, ...] = 1
 
         strangeVol = vol.withAxes(*'ytxcz')
 
@@ -486,6 +485,47 @@ class TestOpLazyCC(unittest.TestCase):
             assert is_fully_contained((roi.start, roi.stop),
                                       ((0,)*5, (1, 27, 27, 8, 1))),\
                 str(roi)
+
+    def testTimeSliceLabelOffsets(self):
+
+        vol0 = np.asarray(
+            [[0, 0, 0, 0, 0, 0, 0, 0, 0],
+             [0, 1, 1, 1, 1, 1, 1, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 1, 1, 1, 1, 1, 1, 0],
+             [0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
+
+        vol1 = np.asarray(
+            [[0, 0, 0, 0, 0, 0, 0, 0, 0],
+             [0, 1, 1, 1, 0, 1, 1, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 0, 0, 0, 0, 0, 1, 0],
+             [0, 1, 1, 1, 0, 1, 1, 1, 0],
+             [0, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
+
+        vol = np.zeros((2, 9, 9))
+        vol[0, ...] = vol0
+        vol[1, ...] = vol1
+        vol = vol.astype(np.uint8)
+        vol = vigra.taggedView(vol, axistags='txy').withAxes(*'txyzc')
+
+        op = OpLazyCC(graph=Graph())
+        op.Input.meta.ideal_blockshape = (1, 3, 3, 1, 1)
+        op.Input.setValue(vol)
+
+        for s, m in zip((0, 1), (1, 2)):
+            print("testing time slice {}".format(s))
+            out = op.Output[s, ...].wait()
+            out = vigra.taggedView(out, axistags=op.Output.meta.axistags)
+            assert_equal(np.min(out), 0)
+            assert_equal(np.max(out), m)
 
 
 class DirtyAssert(Operator):

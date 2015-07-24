@@ -268,14 +268,15 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         self._numIndices[chunkIndex] = numLabels
         if numLabels > 0:
             with self._lock:
+                uf = self._uf[(chunkIndex[0], chunkIndex[-1])]
                 # determine the offset
                 # localLabel + offset = globalLabel (for localLabel>0)
-                offset = self._uf.makeNewIndex()
+                offset = uf.makeNewIndex()
                 self._globalLabelOffset[chunkIndex] = offset - 1
 
                 # get n-1 more labels
                 for i in range(numLabels-1):
-                    self._uf.makeNewIndex()
+                   uf.makeNewIndex()
         return set(range(1, numLabels+1))
 
     def mergeChunks(self, chunkA, chunkB):
@@ -319,15 +320,19 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
         # union find manipulations are critical
         with self._lock:
+            t, c = chunkA[0], chunkA[-1]
             map_a = self.localToGlobal(chunkA)
             map_b = self.localToGlobal(chunkB)
             labels_a = map_a[label_hyperplane_a[adjacent_bool_inds]]
             labels_b = map_b[label_hyperplane_b[adjacent_bool_inds]]
             for a, b in zip(labels_a, labels_b):
-                #FIXME this should be [t, c]
-                assert a not in self._globalToFinal, "Invalid merge"
-                assert b not in self._globalToFinal, "Invalid merge"
-                self._uf.makeUnion(a, b)
+                print(a, b)
+                print(self._globalToFinal[(t, c)])
+                assert a != b, "\nmap_a: {}\nmap_b: {}\n(a, b): {}\nglobal_label_offset[a]: {}\nglobal_label_offset[b]: {}".format(map_a, map_b, (a, b), self._globalLabelOffset[chunkA], self._globalLabelOffset[chunkB])
+                assert a not in self._globalToFinal[(t, c)], "Invalid merge"
+                assert b not in self._globalToFinal[(t, c)], "Invalid merge"
+                uf = self._uf[(t, c)]
+                uf.makeUnion(a, b)
 
             logger.debug("merged chunks {} and {}".format(chunkA, chunkB))
         correspondingLabelsA = label_hyperplane_a[adjacent_bool_inds]
@@ -373,9 +378,6 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         numLabels = self._numIndices[chunkIndex]
         labels = np.arange(1, numLabels+1, dtype=_LABEL_TYPE) + offset
 
-        labels = np.asarray(map(self._uf.findIndex, labels),
-                            dtype=_LABEL_TYPE)
-
         # we got 'numLabels' real labels, and one label '0', so our
         # output has to have numLabels+1 elements
         out = np.zeros((numLabels+1,), dtype=_LABEL_TYPE)
@@ -393,7 +395,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         d = self._globalToFinal[(t, c)]
         labeler = self._labelIterators[(t, c)]
         for k in np.unique(labels):
-            l = self._uf.findIndex(k)
+            l = self._uf[(t, c)].findIndex(k)
             if l == 0:
                 continue
 
@@ -431,8 +433,8 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
         # union find data structure, tells us for every global index to which
         # label it belongs
-        #FIXME should be per t/c
-        self._uf = UnionFindArray(_LABEL_TYPE(1))
+        gen = partial(UnionFindArray, _LABEL_TYPE(1))
+        self._uf = defaultdict(gen)
 
         ### global labels ###
         # keep track of assigned global labels
