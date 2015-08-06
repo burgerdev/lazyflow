@@ -310,10 +310,10 @@ class Request( object ):
 
         try:
             # Notify callbacks (one or the other, not both)
-            if self.cancelled:
-                self._sig_cancelled()
-            elif self.exception is not None:
+            if self.exception is not None:
                 self._sig_failed( self.exception, self.exception_info )
+            elif self.cancelled:
+                self._sig_cancelled()
             else:
                 self._sig_finished(self._result)
 
@@ -529,8 +529,7 @@ class Request( object ):
         If we have to wait, suspend the current request instead of blocking the whole worker thread.
         """
         # Before we suspend the current request, check to see if it's been cancelled since it last blocked
-        if current_request.cancelled:
-            raise Request.CancellationException()
+        Request.raise_if_cancelled()
 
         if current_request == self:
             # It's usually nonsense for a request to wait for itself,
@@ -588,8 +587,7 @@ class Request( object ):
 
         # Now we're back (no longer suspended)
         # Was the current request cancelled while it was waiting for us?
-        if current_request.cancelled:
-            raise Request.CancellationException()
+        Request.raise_if_cancelled()
         
         # Are we back because we failed?
         if self.exception is not None:
@@ -864,6 +862,7 @@ class RequestLock(object):
             # Try to get it immediately.
             got_it = self._modelLock.acquire(False)
             if not blocking:
+                Request.raise_if_cancelled()
                 return got_it
             if not got_it:
                 # We have to wait.  Add ourselves to the list of waiters.
@@ -876,8 +875,7 @@ class RequestLock(object):
 
             # Now we're back (no longer suspended)
             # Was the current request cancelled while it was waiting for the lock?
-            if current_request.cancelled:
-                raise Request.CancellationException()
+            Request.raise_if_cancelled()
 
         # Guaranteed to own _modelLock now (see release()).
         return True
@@ -1014,7 +1012,11 @@ class SimpleRequestCondition(object):
         #self.__exit__ = self._debug_condition.__exit__        
 
     def __enter__(self):
-        return self._ownership_lock.__enter__()
+        try:
+            return self._ownership_lock.__enter__()
+        except Request.CancellationException:
+            self._notify_nocheck()
+            raise
         
     def __exit__(self, *args):
         self._ownership_lock.__exit__(*args)
@@ -1063,7 +1065,12 @@ class SimpleRequestCondition(object):
         .. note:: It is okay to call this from more than one request in parallel.
         """
         assert self._ownership_lock.locked(), "Forbidden to call SimpleRequestCondition.notify() unless you own the condition."
+        self._notify_nocheck()
 
+    def _notify_nocheck(self):
+        """
+        Notify anyone waiting, without checking that the lock is actually owned.
+        """
         # Release the waiter for anyone currently waiting
         if self._waiter_lock.locked():
             self._waiter_lock.release()

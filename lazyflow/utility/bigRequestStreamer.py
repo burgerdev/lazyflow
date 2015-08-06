@@ -23,10 +23,10 @@ import numpy
 from lazyflow.request import Request
 from lazyflow.utility import RoiRequestBatch
 from lazyflow.roi import getIntersectingBlocks, getBlockBounds, getIntersection, determine_optimal_request_blockshape, determineBlockShape
-import lazyflow
 
 import logging
-import psutil
+import warnings
+from memory import Memory
 logger = logging.getLogger(__name__)
 
 class BigRequestStreamer(object):
@@ -167,30 +167,28 @@ class BigRequestStreamer(object):
 
         max_blockshape = input_shape
         num_threads = max(1, Request.global_thread_pool.num_workers)
-        if lazyflow.AVAILABLE_RAM_MB != 0:
-            available_ram = lazyflow.AVAILABLE_RAM_MB * 1e6
-        else:
-            available_ram = psutil.virtual_memory().available
+        available_ram = Memory.getAvailableRamComputation()
         
         if ram_usage_per_requested_pixel is None:
             # Make a conservative guess: 2*(bytes for dtype) * (num channels) + (fudge factor=4)
             ram_usage_per_requested_pixel = 2*outputSlot.meta.dtype().nbytes*num_channels + 4
-            logger.warn( "Unknown per-pixel RAM requirement.  Making a guess." )
+            warnings.warn( "Unknown per-pixel RAM requirement.  Making a guess." )
 
         # Safety factor (fudge factor): Double the estimated RAM usage per pixel
         safety_factor = 2.0
-        logger.info( "Estimated RAM usage per pixel is {} bytes * safety factor ({})"
-                           .format( ram_usage_per_requested_pixel, safety_factor ) )
+        logger.info("Estimated RAM usage per pixel is {} * safety factor ({})"
+                    .format( Memory.format(ram_usage_per_requested_pixel), safety_factor ) )
         ram_usage_per_requested_pixel *= safety_factor
         
         if ideal_blockshape is None:
             blockshape = determineBlockShape( input_shape, available_ram/(num_threads*ram_usage_per_requested_pixel) )
             if 'c' in outputSlot.meta.getAxisKeys():
                 blockshape = blockshape[:channel_index] + (num_channels,) + blockshape[channel_index:]
-            logger.warn( "Chose an arbitrary request blockshape {}".format( blockshape ) )
+            warnings.warn( "Chose an arbitrary request blockshape {}".format( blockshape ) )
         else:
-            logger.info( "determining blockshape assuming available_ram is {} GB, split between {} threads"
-                         .format( available_ram/1e9, num_threads ) )
+            logger.info("determining blockshape assuming available_ram is {}"
+                        ", split between {} threads"
+                        .format(Memory.format(available_ram), num_threads))
             
             # By convention, ram_usage_per_requested_pixel refers to the ram used when requesting ALL channels of a 'pixel'
             # Therefore, we do not include the channel dimension in the blockshapes here.
@@ -202,8 +200,9 @@ class BigRequestStreamer(object):
             if 'c' in outputSlot.meta.getAxisKeys():
                 blockshape = blockshape[:channel_index] + (num_channels,) + blockshape[channel_index:]
             logger.info( "Chose blockshape: {}".format( blockshape ) )
-            logger.info( "Estimated RAM usage per block is {} GB"
-                         .format( ram_usage_per_requested_pixel / 1e9 * numpy.prod( blockshape ) / num_channels ) )
+            fmt = Memory.format(ram_usage_per_requested_pixel *
+                                numpy.prod(blockshape[:-1]))
+            logger.info("Estimated RAM usage per block is {}".format(fmt))
 
         return blockshape
         
