@@ -115,10 +115,6 @@ class OpImplementationChoice(Operator):
             self.outputs[outerSlot.name] = outerSlot
             setattr(self, outerSlot.name, outerSlot)
 
-        # set all slots to unready until some implementation provides them
-        for k in self.outputs:
-            self.outputs[k].meta.NOTREADY = True
-
     def setupOutputs(self):
         impl = self._Implementation.value
         while isinstance(impl, np.ndarray):
@@ -138,7 +134,7 @@ class OpImplementationChoice(Operator):
             op = self._op
             self._op = None
             for k in self.outputs:
-                self.outputs[k].meta.NOTREADY = True  # also disconnects
+                self.outputs[k].disconnect()
             for k in op.inputs:
                 op.inputs[k].disconnect()
 
@@ -151,6 +147,12 @@ class OpImplementationChoice(Operator):
             if not k.startswith("_") and k in self.outputs:
                 self.outputs[k].connect(op.outputs[k])
                 self.outputs[k].meta.NOTREADY = None
+        for k in self.outputs:
+            if k not in op.outputs:
+                # the current operator does not provide this output
+                self.outputs[k].disconnect()
+                self.outputs[k].meta.NOTREADY = True
+
         self._op = op
 
         self._current_impl = impl

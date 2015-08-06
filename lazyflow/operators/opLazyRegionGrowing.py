@@ -266,7 +266,7 @@ class OpLazyRegionGrowing(Operator):
         expects requests to come for exactly one slot. This can be
         changed by implementing execute().
         """
-        logger.debug("Growing region for {}".format(roi))
+        logger.debug("Growing region for roi {}".format(roi.pprint()))
         self.__manager.hello()
         othersToWaitFor = set()
         chunks = self.roiToChunkIndex(roi)

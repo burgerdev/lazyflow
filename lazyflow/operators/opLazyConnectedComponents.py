@@ -196,7 +196,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
     def execute(self, slot, subindex, roi, result):
         if slot is self._Output:
-            logger.debug("Execute for {}".format(roi))
+            logger.debug("Execute for roi {}".format(roi.pprint()))
             self.executeRegionGrowing(roi, result)
         else:
             raise ValueError("Request to invalid slot {}".format(str(slot)))
@@ -258,7 +258,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
         roi = self.chunkIndexToRoi(chunkIndex)
         logger.debug("requesting labels for chunk {} ({})".format(
-            chunkIndex, roi))
+            chunkIndex, roi.pprint()))
         labeled = self._Labels.get(roi).wait()
         labeled = vigra.taggedView(labeled,
                                    axistags=self._Labels.meta.axistags)
@@ -318,16 +318,23 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         adjacent_bool_inds = np.logical_and(
             adjacent_bool_inds, hyperplane_a == hyperplane_b)
 
+        # remove duplicate pairs of labels
+        labels_a = label_hyperplane_a[adjacent_bool_inds]
+        labels_b = label_hyperplane_b[adjacent_bool_inds]
+        label_pairs = []
+        for label_a in np.unique(labels_a):
+            corresponding_labels_b = np.unique(labels_b[labels_a == label_a])
+            for label_b in corresponding_labels_b:
+                label_pairs.append((label_a, label_b))
+
         # union find manipulations are critical
         with self._lock:
             t, c = chunkA[0], chunkA[-1]
             map_a = self.localToGlobal(chunkA)
             map_b = self.localToGlobal(chunkB)
-            labels_a = map_a[label_hyperplane_a[adjacent_bool_inds]]
-            labels_b = map_b[label_hyperplane_b[adjacent_bool_inds]]
-            for a, b in zip(labels_a, labels_b):
-                print(a, b)
-                print(self._globalToFinal[(t, c)])
+            for label_a, label_b in label_pairs:
+                a = map_a[label_a]
+                b = map_b[label_b]
                 assert a != b, "\nmap_a: {}\nmap_b: {}\n(a, b): {}\nglobal_label_offset[a]: {}\nglobal_label_offset[b]: {}".format(map_a, map_b, (a, b), self._globalLabelOffset[chunkA], self._globalLabelOffset[chunkB])
                 assert a not in self._globalToFinal[(t, c)], "Invalid merge"
                 assert b not in self._globalToFinal[(t, c)], "Invalid merge"
@@ -342,7 +349,7 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
     def fillResult(self, roi, result):
         assert np.all(roi.stop - roi.start == result.shape)
 
-        logger.debug("mapping roi {}".format(roi))
+        logger.debug("mapping roi {}".format(roi.pprint()))
         indices = self.roiToChunkIndex(roi)
         for idx in indices:
             newroi = self.chunkIndexToRoi(idx)
@@ -483,7 +490,10 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
 
     def usedMemory(self):
         #TODO check administrative data
-        return 0
+        if self._labelCache is not None:
+            return self._labelCache.usedMemory()
+        else:
+            return 0
 
     def fractionOfUsedMemoryDirty(self):
         # we do not handle dirtyness

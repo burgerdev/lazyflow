@@ -235,7 +235,6 @@ class OpLazyCC(OpCachedLabeling):
         if self.Input.meta.ideal_blockshape is not None:
             shape = self.Input.meta.ideal_blockshape
             shape = np.where(shape > 0, shape, max_shape)
-            print(shape, max_shape)
             shape = np.maximum(shape, max_shape)
         else:
             # go for blocks of roughly 10MiB size (e.g. 1024x1024x10)

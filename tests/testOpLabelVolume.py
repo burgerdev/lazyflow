@@ -328,6 +328,28 @@ class TestLazy(TestVigra):
             "({}/4)".format(opCount.numExecutes)
 
 
+class TestImplementationSwitch(unittest.TestCase):
+    def setUp(self):
+        pass
+
+    def testSwitch(self):
+        vol = np.zeros((200, 100, 10))
+        vol = vol.astype(np.uint8)
+        vol = vigra.taggedView(vol, axistags='xyz')
+
+        g = Graph()
+        op = OpLabelVolume(graph=g)
+        #op.Input.setValue(vol)
+
+        op.Method.setValue("vigra")
+        for k in op.outputs:
+            assert op.outputs[k].meta.NOTREADY is None, k
+
+        op.Method.setValue("lazy")
+        for k in op.outputs:
+            assert op.outputs[k].meta.NOTREADY is None, k
+
+
 class DirtyAssert(Operator):
     Input = InputSlot()
 
