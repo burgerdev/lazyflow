@@ -527,6 +527,22 @@ class TestOpLazyCC(unittest.TestCase):
             assert_equal(np.min(out), 0)
             assert_equal(np.max(out), m)
 
+    def testCorrectChunkShape(self):
+        vol = np.zeros((100, 100, 100))
+        vol = vol.astype(np.uint8)
+        vol = vigra.taggedView(vol, axistags='xyz')
+
+        vol[20:40, 10:30, 2:4] = 1
+
+        op = OpLazyCC(graph=Graph())
+        op.Input.meta.ideal_blockshape = (5, 7, 9)
+        op.Input.setValue(vol)
+
+        bs = op.Output.meta.ideal_blockshape
+        expected = op.Input.meta.ideal_blockshape
+
+        np.testing.assert_array_equal(bs, expected)
+
 
 class DirtyAssert(Operator):
     Input = InputSlot()

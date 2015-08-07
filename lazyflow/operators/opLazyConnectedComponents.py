@@ -183,6 +183,9 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         # go back to original order
         self._opOut.AxisOrder.setValue(self.Input.meta.getAxisKeys())
 
+        # update ideal_blockshape to the one we're using
+        self._Output.meta.ideal_blockshape = tuple(self._chunkShape)
+
         # set up label cache
         if self._labelCache is not None:
             self._Labels.disconnect()
@@ -465,24 +468,12 @@ class OpLazyConnectedComponents(OpLazyRegionGrowing, ObservableCache):
         if not slot.ready():
             return None
 
-        # use about 10MiB per chunk
-        ram = 10*1024**2
+        shape = slot.meta.shape
+        ideal_blockshape = slot.meta.ideal_blockshape
         ram_per_pixel = slot.meta.getDtypeBytes()
 
-        def prepareShape(s):
-            return (1,) + tuple(s)[1:4] + (1,)
+        chunkShape = lazyChunkShape(shape, ideal_blockshape, ram_per_pixel)
 
-        max_shape = prepareShape(slot.meta.shape)
-        if slot.meta.ideal_blockshape is not None:
-            ideal_shape = prepareShape(slot.meta.ideal_blockshape)
-        else:
-            ideal_shape = (1, 0, 0, 0, 1)
-
-        if np.prod(ideal_shape) > 0:
-            return np.minimum(ideal_shape, max_shape)
-
-        chunkShape = determine_optimal_request_blockshape(
-            max_shape, ideal_shape, ram_per_pixel, 1, ram)
         logger.debug("Using chunk shape {}".format(chunkShape))
         return chunkShape
 
@@ -580,3 +571,24 @@ class InfiniteLabelIterator(object):
         assert a < np.iinfo(self.dtype).max, "Label overflow."
         self.n += 1
         return a
+
+
+def lazyChunkShape(shape, ideal_blockshape, ram_per_pixel):
+    # use about 10MiB per chunk
+    ram = 10*1024**2
+
+    def prepareShape(s):
+        return (1,) + tuple(s)[1:4] + (1,)
+
+    max_shape = prepareShape(shape)
+    if ideal_blockshape is not None:
+        ideal_shape = prepareShape(ideal_blockshape)
+    else:
+        ideal_shape = (1, 0, 0, 0, 1)
+
+    if np.prod(ideal_shape) > 0:
+        return np.minimum(ideal_shape, max_shape)
+
+    chunkShape = determine_optimal_request_blockshape(
+        max_shape, ideal_shape, ram_per_pixel, 1, ram)
+    return chunkShape

@@ -27,11 +27,11 @@ from itertools import ifilter
 
 from lazyflow.operator import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
-from lazyflow.roi import determine_optimal_request_blockshape
 from lazyflow.request import RequestLock as Lock
 
 from lazyflow.operators import OpReorderAxes
 from lazyflow.operators.opLazyRegionGrowing import OpLazyRegionGrowing
+from lazyflow.operators.opLazyConnectedComponents import lazyChunkShape
 
 import logging
 logger = logging.getLogger(__name__)
@@ -240,19 +240,9 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         if not slot.ready():
             return None
 
-        # use about 10MiB per chunk
-        ram = 10*1024**2
+        shape = slot.meta.shape
+        ideal_blockshape = slot.meta.ideal_blockshape
         ram_per_pixel = slot.meta.getDtypeBytes()
 
-        def prepareShape(s):
-            return (1,) + tuple(s)[1:4] + (1,)
-
-        max_shape = prepareShape(slot.meta.shape)
-        if slot.meta.ideal_blockshape is not None:
-            ideal_shape = prepareShape(slot.meta.ideal_blockshape)
-        else:
-            ideal_shape = (1, 0, 0, 0, 1)
-
-        chunkShape = determine_optimal_request_blockshape(
-            max_shape, ideal_shape, ram_per_pixel, 1, ram)
+        chunkShape = lazyChunkShape(shape, ideal_blockshape, ram_per_pixel)
         return chunkShape
