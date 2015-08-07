@@ -215,3 +215,39 @@ class TestOpFilterLabelsLazy(unittest.TestCase):
         with self.assertRaises(PropagateDirtyCalled):
             op.MinLabelSize.setValue(17)
 
+    def testParallel(self):
+        shape = (100, 100, 100)
+
+        vol = np.ones(shape, dtype=np.uint8)
+        vol = vigra.taggedView(vol, axistags='xyz')
+
+        g = Graph()
+
+        piper = OpArrayPiperWithAccessCount(graph=g)
+        piper.Input.meta.ideal_blockshape = (25, 25, 25)
+        piper.Input.setValue(vol)
+
+        op = OpFilterLabelsLazy(graph=g)
+        op.Input.connect(piper.Output)
+        op.MinLabelSize.setValue(1)
+        op.MaxLabelSize.setValue(100**3-1)
+
+        reqs = [op.Output[..., 0],
+                op.Output[..., 0],
+                op.Output[..., 99],
+                op.Output[..., 99],
+                op.Output[0, ...],
+                op.Output[0, ...],
+                op.Output[99, ...],
+                op.Output[99, ...],
+                op.Output[:, 0, ...],
+                op.Output[:, 0, ...],
+                op.Output[:, 99, ...],
+                op.Output[:, 99, ...]]
+
+        [r.submit() for r in reqs]
+
+        out = [r.wait() for r in reqs]
+
+        for x in out:
+            np.testing.assert_array_equal(x, 0)

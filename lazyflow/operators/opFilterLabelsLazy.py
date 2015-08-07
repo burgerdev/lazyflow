@@ -21,28 +21,27 @@
 ###############################################################################
 
 import numpy as np
-from threading import Lock
 
 from collections import defaultdict
 from itertools import ifilter
 
-from lazyflow.operator import Operator, InputSlot, OutputSlot
-from lazyflow.operators.opFilterLabels import OpLabelFilteringABC
-from lazyflow.operators import OpReorderAxes
+from lazyflow.operator import InputSlot, OutputSlot
 from lazyflow.rtype import SubRegion
 from lazyflow.roi import determine_optimal_request_blockshape
+from lazyflow.request import RequestLock as Lock
+
+from lazyflow.operators import OpReorderAxes
+from lazyflow.operators.opLazyRegionGrowing import OpLazyRegionGrowing
 
 import logging
 logger = logging.getLogger(__name__)
-
-from opLazyRegionGrowing import OpLazyRegionGrowing
 
 
 class OpFilterLabelsLazy(OpLazyRegionGrowing):
     """
     Given a labeled volume, discard labels that have too few pixels.
     Zero is used as the background label, and filtering is done
-    seperately in each time/channel slice. 
+    seperately in each time/channel slice.
     This operator tries to compute as few chunks as possible for a
     given ROI with the same result as a global filter operator would
     give.
@@ -54,7 +53,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
     ChunkShape = InputSlot(optional=True)
 
     # slots from filteringABC
-    Input = InputSlot() 
+    Input = InputSlot()
     MinLabelSize = InputSlot(stype='int')
     MaxLabelSize = InputSlot(optional=True, stype='int')
     BinaryOut = InputSlot(optional=True, value=False, stype='bool')
@@ -82,7 +81,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         self.Output.connect(self._opOut.Output)
 
     def shape(self):
-        return self.Input.meta.shape
+        return self._Input.meta.shape
 
     def chunkShape(self):
         return getattr(self, "_chunkShape", None)
@@ -97,6 +96,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
         else:
             chunkShape = self._automaticChunkShape()
         self._chunkShape = chunkShape
+        logger.debug("Using chunk shape {}".format(chunkShape))
         super(OpFilterLabelsLazy, self).setupOutputs()
 
         self._Output.meta.assignFrom(self._Input.meta)
@@ -178,7 +178,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
                 return set()
             self.__handled[chunk] = True
             roi = self.chunkIndexToRoi(chunk)
-            data = self.Input.get(roi).wait()
+            data = self._Input.get(roi).wait()
             try:
                 bins = np.bincount(data.ravel())
             except TypeError:
@@ -193,7 +193,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
     def mergeChunks(self, chunkA, chunkB):
         a, b = self.orderPair(chunkA, chunkB)
         reordered = a != chunkA
-        
+
         with self.__chunkLocks[a]:
             if b in self.__mergeMap[a]:
                 return set(), set()
@@ -201,11 +201,9 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
 
             hyperplane_roi_a, hyperplane_roi_b = \
                 self.chunkIndexToHyperplane(a, b)
-            hyperplane_index_a = hyperplane_roi_a.toSlice()
-            hyperplane_index_b = hyperplane_roi_b.toSlice()
 
-            hyperplane_a = self.Input.get(hyperplane_roi_a).wait()
-            hyperplane_b = self.Input.get(hyperplane_roi_b).wait()
+            hyperplane_a = self._Input.get(hyperplane_roi_a).wait()
+            hyperplane_b = self._Input.get(hyperplane_roi_b).wait()
             inds = hyperplane_a == hyperplane_b
 
             workA = set(hyperplane_a[inds]) - set([0])
@@ -216,7 +214,7 @@ class OpFilterLabelsLazy(OpLazyRegionGrowing):
                 return workA, workB
 
     def fillResult(self, roi, result):
-        req = self.Input.get(roi)
+        req = self._Input.get(roi)
         req.writeInto(result)
         req.block()
         for t in range(roi.start[0], roi.stop[0]):
